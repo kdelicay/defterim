@@ -161,7 +161,7 @@ const Drive = (() => {
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch(e){} };
   const lsDel = k => { try { localStorage.removeItem(k); } catch(e){} };
   /* halka açık OAuth istemci kimliği (sır değildir); Ayarlar'dan değiştirilirse o kullanılır */
-  const DEFAULT_CID = "579299258289-d9fdhn4cirs7q31ssnrk904fl167d4nu.apps.googleusercontent.com";
+  const DEFAULT_CID = "579299258289-q3mb2445rvslnn51k0b4vrd351vsqn6s.apps.googleusercontent.com";
   const clientId = () => (lsGet(CID) || DEFAULT_CID).trim();
   const isEmpty = d => !d.accounts.length && !d.tx.length && !d.loans.length && !d.rec.length && !d.taksit.length;
   const tstr = ms => ms ? new Date(ms).toLocaleString("tr-TR") : "bilinmiyor";
@@ -178,16 +178,20 @@ const Drive = (() => {
     s.onload = res; s.onerror = () => { gsiP = null; rej(new Error("Google bağlantı kodu yüklenemedi (internet?)")); };
     document.head.appendChild(s);
   }));
-  async function getToken(interactive){
-    if (token && Date.now() < exp - 60000) return token;
-    if (!clientId()) throw new Error("Önce Ayarlar'dan Google istemci kimliğini girin");
-    await gsi();
-    return new Promise((res, rej) => {
+  /* Safari: giriş penceresi dokunma anında, beklemeden açılmalı. Bu yüzden Google kodu önceden yüklenir
+     ve requestAccessToken, await olmadan doğrudan çağrılır. */
+  const gsiReady = () => !!(window.google && google.accounts && google.accounts.oauth2);
+  function getToken(interactive){
+    if (token && Date.now() < exp - 60000) return Promise.resolve(token);
+    if (!clientId()) return Promise.reject(new Error("Önce Ayarlar'dan Google istemci kimliğini girin"));
+    const start = () => new Promise((res, rej) => {
       const tc = google.accounts.oauth2.initTokenClient({client_id:clientId(), scope:SCOPE,
-        callback: r => { if (r.error) return rej(new Error(r.error)); token = r.access_token; exp = Date.now() + (r.expires_in || 3600) * 1000; res(token); },
-        error_callback: e => rej(new Error(e && e.type === "popup_closed" ? "Pencere kapatıldı" : "Giriş gerekli (" + ((e && e.type) || "?") + ")"))});
+        callback: r => { if (r.error) return rej(new Error(r.error === "access_denied" ? "İzin verilmedi (Google hesabınız test kullanıcısı olarak ekli mi?)" : r.error)); token = r.access_token; exp = Date.now() + (r.expires_in || 3600) * 1000; res(token); },
+        error_callback: e => rej(new Error(!e ? "Giriş gerekli" : e.type === "popup_closed" ? "Pencere kapatıldı"
+          : e.type === "popup_failed_to_open" ? "Tarayıcı giriş penceresini engelledi. iPhone: Ayarlar → Safari → \"Açılır Pencereleri Engelle\"yi kapatın, sonra ☁'a tekrar dokunun" : "Giriş gerekli (" + e.type + ")"))});
       tc.requestAccessToken({prompt: interactive ? "" : "none"});
     });
+    return gsiReady() ? start() : gsi().then(start);
   }
   async function api(path, opt = {}){
     const r = await fetch(API + path, {...opt, headers:{Authorization:"Bearer " + token, ...(opt.headers || {})}});
@@ -227,8 +231,9 @@ const Drive = (() => {
       } else lsSet(LAST, String(L));
       lsSet(CONN, "1"); set("ok", act === "down" ? "Drive'dan güncellendi" : act === "up" ? "Drive'a yazıldı" : "Güncel");
     } catch(e){
-      const needLogin = /Giriş gerekli|Oturum|interaction|popup/i.test(e.message);
+      const needLogin = interactive ? false : /Giriş gerekli|Oturum|interaction|popup/i.test(e.message);
       set(needLogin ? "needs" : "err", needLogin ? "Drive'a bağlanmak için ☁ düğmesine dokunun" : e.message);
+      if (interactive) alert("Drive bağlantısı kurulamadı:\n" + e.message);
     } finally { busy = false; }
   }
   return {
@@ -237,6 +242,7 @@ const Drive = (() => {
     setClient(v){ v = (v || "").trim(); if (v) lsSet(CID, v); else { lsDel(CID); lsDel(CONN); } token = null; set(v ? "needs" : "off", v ? "Kaydedildi; bağlanmak için ☁ düğmesine dokunun" : "Bağlı değil"); },
     disconnect(){ if (token && window.google) try { google.accounts.oauth2.revoke(token, () => {}); } catch(e){} token = null; lsDel(CONN); lsDel(LAST); set(clientId() ? "needs" : "off", "Bağlantı kesildi"); },
     init(){
+      if (clientId()) gsi().catch(() => {});   /* Google kodunu önceden yükle (Safari için gerekli) */
       if (clientId() && lsGet(CONN)){ set("needs", "Drive'a bağlanmak için ☁ düğmesine dokunun"); sync(false); }
       else set(clientId() ? "needs" : "off", clientId() ? "Bağlanmak için ☁ düğmesine dokunun" : "Bağlı değil");
       document.addEventListener("visibilitychange", () => { if (!document.hidden && lsGet(CONN) && Date.now() - lastRun > 20000) sync(false); });
