@@ -604,15 +604,31 @@ function editOcc(key){
 }
 
 function viewHesap(E){
-  const b = balancesAt(E, todayISO());
-  const row = a => `<tr><td>${esc(a.name)}</td><td class="${cls(b[a.id])}">${a.type === "kart" ? fmt(-b[a.id]) + ' <span class="muted">borç</span>' : fmt(b[a.id])}</td>${a.type === "kart" ? `<td>${a.limit ? fmt(a.limit) : "—"}</td><td>${a.cut || "—"} / ${a.due || "—"}</td>` : ""}<td>
-    ${a.type === "kart" ? `<button class="mini" onclick="payCard('${a.id}')">Kart ödemesi</button> ` : ""}<button class="mini" onclick="editAcc('${a.id}')">Düzenle</button> <button class="mini del" onclick="delItem('accounts','${a.id}')">Sil</button></td></tr>`;
+  const m = S.m, now = balancesAt(E, todayISO()), end = balancesAt(E, endOf(m));
   const bank = db.accounts.filter(a => a.type !== "kart"), cards = db.accounts.filter(a => a.type === "kart");
-  return `<div class="sect"><h2>Banka ve nakit</h2><button class="primary" onclick="editAcc()">+ Hesap</button></div>
-  <section class="card"><div class="wrap"><table><tr><th>Hesap</th><th>Bakiye (bugün)</th><th></th></tr>${bank.map(row).join("") || `<tr><td colspan="3" class="muted">Henüz hesap yok</td></tr>`}</table></div></section>
+  const kasaNow = liquid(now), kasaEnd = liquid(end), debtNow = debt(now), debtEnd = debt(end);
+  const netNow = kasaNow - debtNow, netEnd = kasaEnd - debtEnd;
+  const delta = v => `<td class="${cls(v)}">${v > 0.005 ? "+" : ""}${fmt(v)}</td>`;
+  const act = a => `<td>${a.type === "kart" ? `<button class="mini" onclick="payCard('${a.id}')">Kart ödemesi</button> ` : ""}<button class="mini" onclick="editAcc('${a.id}')">Düzenle</button> <button class="mini del" onclick="delItem('accounts','${a.id}')">Sil</button></td>`;
+  const bankRow = a => `<tr><td>${esc(a.name)}</td><td class="${cls(now[a.id])}">${fmt(now[a.id])}</td><td class="${cls(end[a.id])}"><b>${fmt(end[a.id])}</b></td>${delta(end[a.id] - now[a.id])}${act(a)}</tr>`;
+  const cardRow = a => `<tr><td>${esc(a.name)}</td><td class="${cls(now[a.id])}">${fmt(-now[a.id])}</td><td class="${cls(end[a.id])}"><b>${fmt(-end[a.id])}</b></td>${delta(-(end[a.id] - now[a.id]))}<td>${a.limit ? fmt(a.limit) : "—"}</td><td>${a.cut || "—"} / ${a.due || "—"}</td>${act(a)}</tr>`;
+  const verdict = netEnd >= 0
+    ? `<div class="ok"><b>${lbl(m)} sonunu ${fmt(netEnd)} ARTIDA kapatıyoruz.</b> Kasa ${fmt(kasaEnd)}, kart borcu ${fmt(debtEnd)} (net = kasa − kart borcu).</div>`
+    : `<div class="alert"><b>${lbl(m)} sonunu ${fmt(-netEnd)} EKSİDE kapatıyoruz.</b> Kasa ${fmt(kasaEnd)}, kart borcu ${fmt(debtEnd)} (net = kasa − kart borcu).${kasaEnd < 0 ? " Kasanın kendisi de eksi: hesaplar açığa düşüyor." : " Kasa artıda, ancak kart borcu kasayı aşıyor."}</div>`;
+  return `<div class="grid kpis">
+    ${kpi(lbl(m) + " sonu kasa (plan)", fmt(kasaEnd), "bugün: " + fmt(kasaNow), cls(kasaEnd))}
+    ${kpi(lbl(m) + " sonu kart borcu (plan)", fmt(debtEnd), "bugün: " + fmt(debtNow), debtEnd > 0.005 ? "neg" : "pos")}
+    ${kpi(lbl(m) + " sonu net durum", (netEnd >= 0 ? "+" : "") + fmt(netEnd), netEnd >= 0 ? "artıda kapanış" : "eksiyle kapanış", cls(netEnd))}
+    ${kpi("Bugünkü net durum", (netNow >= 0 ? "+" : "") + fmt(netNow), "kasa − kart borcu", cls(netNow))}
+  </div>
+  <div style="height:14px"></div>${verdict}
+  <div class="sect"><h2>Banka ve nakit</h2><button class="primary" onclick="editAcc()">+ Hesap</button></div>
+  <section class="card"><div class="wrap"><table><tr><th>Hesap</th><th>Bugün</th><th>${lbl(m)} sonu (plan)</th><th>Değişim</th><th></th></tr>${bank.map(bankRow).join("") || `<tr><td colspan="5" class="muted">Henüz hesap yok</td></tr>`}
+    ${bank.length ? `<tr class="tot"><td>Toplam kasa</td><td class="${cls(kasaNow)}">${fmt(kasaNow)}</td><td class="${cls(kasaEnd)}">${fmt(kasaEnd)}</td>${delta(kasaEnd - kasaNow)}<td></td></tr>` : ""}</table></div></section>
   <div class="sect"><h2>Kredi kartları</h2><button class="primary" onclick="editAcc(null,'kart')">+ Kart</button></div>
-  <section class="card"><div class="wrap"><table><tr><th>Kart</th><th>Borç</th><th>Limit</th><th>Kesim / Son ödeme günü</th><th></th></tr>${cards.map(row).join("") || `<tr><td colspan="5" class="muted">Henüz kart yok</td></tr>`}</table></div>
-  <p class="muted" style="font-size:12px;margin:8px 0 0">Kartla yapılan harcamayı <b>Gider</b> olarak o karta girin; kartı ödemek için <b>Kart ödemesi</b> (transfer) kullanın.</p></section>`;
+  <section class="card"><div class="wrap"><table><tr><th>Kart</th><th>Borç (bugün)</th><th>${lbl(m)} sonu borç (plan)</th><th>Değişim</th><th>Limit</th><th>Kesim / Son ödeme günü</th><th></th></tr>${cards.map(cardRow).join("") || `<tr><td colspan="7" class="muted">Henüz kart yok</td></tr>`}
+    ${cards.length ? `<tr class="tot"><td>Toplam kart borcu</td><td>${fmt(debtNow)}</td><td>${fmt(debtEnd)}</td>${delta(-(debtEnd - debtNow))}<td></td><td></td><td></td></tr>` : ""}</table></div>
+  <p class="muted" style="font-size:12px;margin:8px 0 0">Ay sonu rakamları plana göredir: o aya kadar planlanan gelir, gider, kredi, taksit ve kart ödemeleri dahildir. Değişim sütunu bugünden ay sonuna olan farktır (kart borcunda artı = borç artıyor). Kartla yapılan harcamayı <b>Gider</b> olarak o karta girin; kartı ödemek için <b>Kart borcu ödemesi</b> türünü kullanın.</p></section>`;
 }
 
 function viewKredi(){
@@ -846,7 +862,7 @@ const TABS = [["ozet","Özet"],["islem","İşlemler"],["hesap","Hesaplar"],["kre
 function render(){
   $("#tabs").innerHTML = TABS.map(([k, t]) => `<button class="${S.tab === k ? "on" : ""}" onclick="S.tab='${k}';render()">${t}</button>`).join("");
   $("#selm").value = S.m;
-  $("#selm").style.visibility = ["ozet","islem"].includes(S.tab) ? "visible" : "hidden";
+  $("#selm").style.visibility = ["ozet","islem","hesap"].includes(S.tab) ? "visible" : "hidden";
   const E = events();
   const html = {ozet:viewOzet, islem:viewIslem, hesap:viewHesap, kredi:viewKredi, plan:viewPlan, ayar:viewAyar}[S.tab](E);
   $("#view").innerHTML = html;
