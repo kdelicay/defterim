@@ -547,7 +547,7 @@ function viewIslem(E){
   const rows = list.map(e => {
     const sign = e.type === "gelir" ? "+" : e.type === "gider" ? "−" : "↔", c = e.type === "gelir" ? "pos" : e.type === "gider" ? "neg" : "";
     const what = e.src === "auto" ? `${e.opening ? "Kart borcu" : "Kart ekstresi"} (${e.mode === "asgari" ? "asgari" : "tam"} ödeme)` : (e.note || e.cat || "");
-    const acc = esc(accName(e.account)) + (e.type === "transfer" ? " → " + esc(accName(e.to)) : "");
+    const acc = esc(accName(e.account)) + (e.type === "transfer" ? " → " + esc(accName(e.to)) : "") + (e.src === "tx" && e.type === "gider" && isCard(e.account) ? " · karta harcama (borcu artırır; kart ödemesiyse Düzenle → Tür: Kart borcu ödemesi)" : "");
     const amt = e.skipped ? `<s class="muted">${fmt(e.planAmount)}</s>` : `${sign} ${fmt(e.amount)}` + (e.edited && Math.round(e.amount * 100) !== Math.round(e.planAmount * 100) ? `<br><span class="muted">plan: ${fmt(e.planAmount)}</span>` : "");
     const edit = e.src === "tx" ? `editTx('${e.id}')` : `editOcc('${e.key}')`;
     return `<tr${e.skipped ? ' style="opacity:.55"' : ""}><td>${trDate(e.date)}${e.edited && e.date !== e.defDate ? '<br><span class="muted">plan: ' + trDate(e.defDate) + "</span>" : ""}</td>
@@ -712,7 +712,8 @@ function form(title, fields, vals, onSave){
   $("#cx").onclick = () => d.close();
   fm.onsubmit = e => { e.preventDefault(); const o = {};
     fields.forEach(f => { const el = fm.elements[f.k]; o[f.k] = f.t === "number" ? (parseFloat(String(el.value).replace(",", ".")) || 0) : el.value; });
-    onSave(o); d.close(); save(); render(); };
+    if (onSave(o) === false) return;   /* doğrulama başarısızsa pencere açık kalır */
+    d.close(); save(); render(); };
   d.showModal();
 }
 const accOpts = (fn = () => true) => db.accounts.filter(fn).map(a => [a.id, a.name + (a.type === "kart" ? " (kart)" : "")]);
@@ -733,22 +734,46 @@ function editAcc(id, type){
     o => { const rec = {id:id || uid(), name:o.name.trim() || "Hesap", type:o.type, opening: o.type === "kart" ? -Math.abs(o.opening) : o.opening, limit:o.limit, cut:o.cut, due:o.due, payAcc: o.type === "kart" ? o.payAcc : "", payMode:o.payMode};
       if (id) Object.assign(a, rec); else db.accounts.push(rec); });
 }
+const warn = m => { alert(m); return false; };   /* uyarı göster, formu açık tut */
 function txForm(t, onSave){
   if (needAcc()) return;
   form(t.id ? "İşlemi düzenle" : "Yeni işlem", [
-    {k:"type", l:"Tür", t:"select", opts:[["gider","Gider"],["gelir","Gelir"],["transfer","Transfer / kart ödemesi"]]},
+    {k:"type", l:"Tür", t:"select", opts:[["gider","Gider (harcama)"],["gelir","Gelir"],["kartodeme","Kart borcu ödemesi (bankadan karta)"],["transfer","Hesaplar arası transfer"]]},
     {k:"date", l:"Tarih", t:"date", req:1},
     {k:"amount", l:"Tutar (₺)", t:"number", req:1},
-    {k:"account", l:"Hesap / kart (kaynak)", t:"select", opts:accOpts()},
-    {k:"to", l:"Hedef hesap / kart", t:"select", opts:accOpts(), when:{k:"type", v:["transfer"]}},
+    {k:"account", l:"Harcanan / gelirin yattığı hesap veya kart", t:"select", opts:accOpts(), when:{k:"type", v:["gider","gelir"]}},
+    {k:"srcBank", l:"Ödemenin yapılacağı hesap (paranın çıkacağı yer)", t:"select", opts:accOpts(a => a.type !== "kart"), when:{k:"type", v:["kartodeme"]}},
+    {k:"toCard", l:"Ödenecek kredi kartı", t:"select", opts:accOpts(a => a.type === "kart"), when:{k:"type", v:["kartodeme"]}},
+    {k:"src", l:"Kaynak hesap", t:"select", opts:accOpts(), when:{k:"type", v:["transfer"]}},
+    {k:"to", l:"Hedef hesap", t:"select", opts:accOpts(), when:{k:"type", v:["transfer"]}},
     {k:"cat", l:"Kategori", t:"text", list:"cats", when:{k:"type", v:["gelir","gider"]}},
     {k:"note", l:"Açıklama", t:"text"},
     {k:"doneSel", l:"Durum", t:"select", opts:[["auto","Otomatik (tarihi geldiyse gerçekleşti)"],["1","Gerçekleşti"],["0","Plan (henüz olmadı)"]]}],
-    {...t, doneSel: t.done === undefined ? "auto" : t.done ? "1" : "0"},
-    ({doneSel, ...o}) => { if (doneSel === "1") o.done = true; else if (doneSel === "0") o.done = false; onSave(o); });
+    (() => { const pay = t.type === "transfer" && isCard(t.to), firstBank = db.accounts.find(a => a.type !== "kart"), firstCard = db.accounts.find(a => a.type === "kart");
+      return {...t, type: pay ? "kartodeme" : t.type, srcBank: pay ? t.account : (firstBank || {}).id, toCard: pay ? t.to : (firstCard || {}).id,
+        src: t.type === "transfer" ? t.account : (db.accounts[0] || {}).id, doneSel: t.done === undefined ? "auto" : t.done ? "1" : "0"}; })(),
+    ({doneSel, srcBank, toCard, src, ...o}) => {
+      if (doneSel === "1") o.done = true; else if (doneSel === "0") o.done = false;
+      if (o.type === "kartodeme"){
+        if (!srcBank || !toCard) return warn("Kart ödemesi için bir banka/nakit hesabı ve bir kredi kartı gerekli.");
+        o.type = "transfer"; o.account = srcBank; o.to = toCard;
+      } else if (o.type === "transfer"){
+        o.account = src;
+        if (o.to === o.account) return warn("Kaynak ve hedef aynı olamaz.");
+        if (isCard(o.account) && !confirm("Kaynak bir kredi kartı: bu, karttan nakit çekmek sayılır ve kartın borcunu artırır. Devam edilsin mi?")) return false;
+      } else if (o.type === "gider" && isCard(o.account) && /ödeme|odeme|borç|borc|yatır|yatir|kapat/i.test((o.note || "") + " " + (o.cat || ""))){
+        /* "ödeme" gibi bir açıklamayla karta gider girilmişse büyük olasılıkla kart borcu ödemesidir */
+        if (confirm("Bu kayıt karta yapılmış bir HARCAMA olarak girildi ve kartın borcunu ARTIRIR.\nKart borcunu ödüyorsanız Tamam'a basın: kart ödemesine çevrilir (para bir banka hesabından düşer).")){
+          const card = db.accounts.find(a => a.id === o.account), bank = db.accounts.find(a => a.id === card.payAcc) || db.accounts.find(a => a.type !== "kart");
+          if (!bank) return warn("Önce bir banka hesabı ekleyin.");
+          o.type = "transfer"; o.to = o.account; o.account = bank.id; delete o.cat;
+          alert(`Kart ödemesi olarak kaydedildi. Para "${bank.name}" hesabından düşer; başka hesaptan ödüyorsanız İşlemler'de Düzenle ile değiştirin.`);
+        }
+      }
+      return onSave(o); });
 }
 function editTx(id){ const t = db.tx.find(x => x.id === id); txForm(t, o => { delete t.done; Object.assign(t, o); }); }
-function addTx(){ txForm({type:"gider", date:todayISO(), amount:0, account:(db.accounts[0] || {}).id, to:(db.accounts[1] || db.accounts[0] || {}).id, cat:"", note:""}, o => { if (o.type === "transfer" && o.to === o.account) { alert("Kaynak ve hedef aynı olamaz."); return; } db.tx.push({id:uid(), ...o}); }); }
+function addTx(){ txForm({type:"gider", date:todayISO(), amount:0, account:(db.accounts[0] || {}).id, to:(db.accounts[1] || db.accounts[0] || {}).id, cat:"", note:""}, o => { db.tx.push({id:uid(), ...o}); }); }
 function payCard(id, amt){ const card = db.accounts.find(a => a.id === id), bank = db.accounts.find(a => a.id === card.payAcc) || db.accounts.find(a => a.type !== "kart");
   if (!bank) return alert("Ödeme için önce bir banka hesabı ekleyin.");
   txForm({type:"transfer", date:todayISO(), amount:amt || 0, account:bank.id, to:id, note:"Kart ödemesi"}, o => db.tx.push({id:uid(), ...o})); }
