@@ -474,6 +474,32 @@ function viewOzet(E){
   const curM = thisYM(), kAct = m > curM ? 0 : m === curM ? +today.slice(8) : dailyAct.bal.length;   /* gerçekleşen grafik yalnızca bugüne kadar */
   const planNow = m === curM ? daily.bal[kAct - 1] : null, actNow = kAct ? dailyAct.bal[kAct - 1] : null;
   const bAct = balancesAt(E, today, true);
+  /* köprü: kasa ve kart borcu ay içinde nasıl değişti (birikim = gelir − gider = net varlık artışı) */
+  const liqS = new Set(db.accounts.filter(a => a.type !== "kart").map(a => a.id)), mEv = E.filter(e => e.date.startsWith(m) && !e.skipped);
+  const addUp = f => mEv.filter(f).reduce((s, e) => s + e.amount, 0);
+  const bInc = addUp(e => e.type === "gelir" && liqS.has(e.account)), bCash = addUp(e => e.type === "gider" && liqS.has(e.account));
+  const bCardSp = addUp(e => e.type === "gider" && !liqS.has(e.account)), bPay = addUp(e => e.type === "transfer" && liqS.has(e.account) && !liqS.has(e.to));
+  const bAdv = addUp(e => e.type === "transfer" && !liqS.has(e.account) && liqS.has(e.to)), bCardInc = addUp(e => e.type === "gelir" && !liqS.has(e.account));
+  const debtOpen = debt(balancesAt(E, endOf(addM(m, -1)))), debtEnd = debt(bEnd), netEndV = open - debtOpen + net, bOther = cur.kasa - (open + bInc - bCash - bPay + bAdv);
+  const brow = (t, v, c, strong) => `<tr${strong ? ' class="tot"' : ""}><td class="l">${t}</td><td class="${c || ""}">${v}</td></tr>`;
+  const bridge = `<section class="card"><h2>${lbl(m)}: kasa ve kart borcu nasıl değişiyor?</h2>
+    <div class="grid two">
+      <div class="wrap"><table><tr><th class="l">Kasa (banka + nakit)</th><th></th></tr>
+        ${brow("Ay başı kasa", fmt(open), cls(open))}
+        ${brow("+ Gelirler", fmt(bInc), "pos")}
+        ${brow("− Banka/nakit giderleri (kredi, okul, fatura…)", fmt(bCash), "neg")}
+        ${brow("− Kart borcu ödemeleri <span class='muted'>(önceki aylardan kalan borçlar dahil)</span>", fmt(bPay), "neg")}
+        ${bAdv > 0.005 ? brow("+ Karttan çekilen nakit", fmt(bAdv)) : ""}${Math.abs(bOther) > 0.5 ? brow("± Diğer", fmt(bOther)) : ""}
+        ${brow("= Ay sonu kasa", fmt(cur.kasa), cls(cur.kasa), true)}</table></div>
+      <div class="wrap"><table><tr><th class="l">Kart borcu</th><th></th></tr>
+        ${brow("Ay başı kart borcu", fmt(debtOpen), "neg")}
+        ${brow("+ Karta yapılan harcama ve taksitler", fmt(bCardSp), "neg")}
+        ${brow("− Ödemeler (soldaki tablodan)", fmt(bPay), "pos")}
+        ${bAdv > 0.005 || bCardInc > 0.005 ? brow("± Diğer", fmt(bAdv - bCardInc)) : ""}
+        ${brow("= Ay sonu kart borcu", fmt(debtEnd), debtEnd > 0.005 ? "neg" : "pos", true)}</table></div>
+    </div>
+    <p class="muted" style="margin:10px 0 0;font-size:13px"><b>Aylık birikim (${fmt(net)}) = gelir − gider</b> ve kasa − kart borcu farkındaki (net varlık) artışa eşittir: ${fmt(open - debtOpen)} → ${fmt(netEndV)}.
+    Kart borcu ödemesi <b>gider sayılmaz</b>: kasadan çıkar ama borcu aynı tutarda azaltır. Bu yüzden kasa düşerken birikim artıda görünebilir; kasanın düşmesinin sebebi, önceki aylardan kalan kart borcunu ödemenizdir (${fmt(bPay)}).</p></section>`;
 
   const upAll = monthPayments(E, m), up = upAll, cashRows = upAll.filter(u => !u.card);
   const upTot = cashRows.reduce((s, u) => s + u.amount, 0), upLeft = cashRows.filter(u => !u.done).reduce((s, u) => s + u.amount, 0);
@@ -486,12 +512,14 @@ function viewOzet(E){
     ${kpi("Devir (ay başı kasa)", fmt(open), "önceki aydan", cls(open))}
     ${kpi("Gelir", fmt(cur.inc), lbl(m), "pos")}
     ${kpi("Gider", fmt(cur.exp), "kredi + taksit dahil", "neg")}
-    ${kpi("Aylık birikim", fmt(net), net >= 0 ? "gelir − gider" : "bu ay açık veriyor", cls(net))}
+    ${kpi("Aylık birikim", fmt(net), net >= 0 ? "gelir − gider · kart borcu ödemesi hariç" : "bu ay açık veriyor (gelir < gider)", cls(net))}
     ${kpi("Ay sonu kasa", fmt(cur.kasa), "sonraki aya devir", cls(cur.kasa))}
     ${kpi("Net varlık", fmt(cur.kasa - cur.debt), "kasa − kart borcu", cls(cur.kasa - cur.debt))}
   </div>
   <div style="height:14px"></div>
   ${status}
+  ${bridge}
+  <div style="height:14px"></div>
   ${overdraft.length ? `<div class="alert"><b>${lbl(m)} sonu açık hesap:</b> ${overdraft.map(a => `${esc(a.name)} (${fmt(bEnd[a.id])})`).join(", ")} — toplam açık ${fmt(odSum)}.</div>` : ""}
   <div class="grid">   <!-- tek sütun: ödeme tablosu geniş olduğu için tam genişlikte, tek satırda -->
     <section class="card"><h2>Banka ve nakit</h2><div class="wrap"><table>
