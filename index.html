@@ -160,7 +160,9 @@ const Drive = (() => {
   const st = {state:"off", msg:"Bağlı değil", at:0};
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch(e){} };
   const lsDel = k => { try { localStorage.removeItem(k); } catch(e){} };
-  const clientId = () => (lsGet(CID) || "").trim();
+  /* halka açık OAuth istemci kimliği (sır değildir); Ayarlar'dan değiştirilirse o kullanılır */
+  const DEFAULT_CID = "579299258289-d9fdhn4cirs7q31ssnrk904fl167d4nu.apps.googleusercontent.com";
+  const clientId = () => (lsGet(CID) || DEFAULT_CID).trim();
   const isEmpty = d => !d.accounts.length && !d.tx.length && !d.loans.length && !d.rec.length && !d.taksit.length;
   const tstr = ms => ms ? new Date(ms).toLocaleString("tr-TR") : "bilinmiyor";
   function set(state, msg){ st.state = state; st.msg = msg; if (state === "ok") st.at = Date.now(); paint(); }
