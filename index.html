@@ -170,7 +170,7 @@ function load(){ try { const r = localStorage.getItem(KEY); if (r) db = Object.a
 const lsGet = k => { try { return localStorage.getItem(k); } catch(e){ return null; } };
 const SNAP = KEY + "_snap_";
 const snapKeys = () => { try { return Object.keys(localStorage).filter(k => k.startsWith(SNAP)).sort(); } catch(e){ return []; } };
-function save(){ db.meta = {updated: Math.max(Date.now(), ((db.meta && db.meta.updated) || 0) + 1)}; persist(); Drive.queue(); }
+function save(){ db.meta = {updated: Math.max(Date.now(), ((db.meta && db.meta.updated) || 0) + 1)}; persist(); Drive.paint(); }
 function persist(){
   try {
     db.tx.forEach(t => { if (t.type !== "transfer") delete t.to; });   /* gider/gelirde kalan eski gizli "hedef" alanını temizle */
@@ -188,52 +188,53 @@ function restoreFrom(key){
 }
 const S = {tab:"ozet", m: thisYM(), acc:""};
 
-/* ---------- Google Drive eşitleme ----------
-   Veri, kullanıcının Drive'ındaki uygulamaya özel gizli klasörde (appDataFolder) tek bir json dosyası olarak tutulur.
-   Yalnızca bu uygulamanın kendi dosyasına erişir; Drive'ın geri kalanını göremez. */
+/* ---------- Google Drive: yalnızca ELLE yükle / al ----------
+   Uygulama tamamen yerelde çalışır; Google'a yalnızca "Drive'a yükle" / "Drive'dan al" düğmesine basınca bağlanır.
+   Arka planda eşitleme, açılışta Google kodu yükleme ya da otomatik giriş denemesi YOKTUR.
+   Veri, Drive'daki uygulamaya özel gizli klasörde (appDataFolder) tek bir json dosyasıdır; Drive'ın geri kalanına erişilmez. */
 const Drive = (() => {
-  const CID = "defterim_gclient", LAST = "defterim_lastsync", CONN = "defterim_gconn", FILE = "defterim.json";
+  const CID = "defterim_gclient", LAST = "defterim_lastsync", LASTAT = "defterim_lastsync_at", FILE = "defterim.json";
   const SCOPE = "https://www.googleapis.com/auth/drive.appdata", API = "https://www.googleapis.com";
-  let token = null, exp = 0, timer = null, busy = false, lastRun = 0, gsiP = null;
-  const st = {state:"off", msg:"Bağlı değil", at:0};
+  let token = null, exp = 0, busy = false, gsiP = null;
   const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch(e){} };
   const lsDel = k => { try { localStorage.removeItem(k); } catch(e){} };
   /* halka açık OAuth istemci kimliği (sır değildir); Ayarlar'dan değiştirilirse o kullanılır */
   const DEFAULT_CID = "579299258289-q3mb2445rvslnn51k0b4vrd351vsqn6s.apps.googleusercontent.com";
   const clientId = () => (lsGet(CID) || DEFAULT_CID).trim();
   const isEmpty = d => !d.accounts.length && !d.tx.length && !d.loans.length && !d.rec.length && !d.taksit.length;
-  const tstr = ms => ms ? new Date(ms).toLocaleString("tr-TR") : "bilinmiyor";
-  function set(state, msg){ st.state = state; st.msg = msg; if (state === "ok") st.at = Date.now(); paint(); }
-  function paint(){
-    const b = document.getElementById("cloud"), s = document.getElementById("drvstat");
-    const label = {off:"☁ Drive", needs:"☁ Bağlan", busy:"☁ …", ok:"☁ ✓", err:"☁ !"}[st.state];
-    if (b){ b.textContent = label; b.title = st.msg; b.style.color = st.state === "ok" ? "var(--pos)" : st.state === "err" ? "var(--neg)" : ""; }
-    if (s) s.textContent = st.msg + (st.state === "ok" && st.at ? " · " + new Date(st.at).toLocaleTimeString("tr-TR") : "");
-  }
+  const tstr = ms => ms ? new Date(+ms).toLocaleString("tr-TR", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"}) : "hiç";
+  const localStamp = () => (db.meta && db.meta.updated) || 0;
+  const unsynced = () => !isEmpty(Object.assign(blank(), db)) && localStamp() !== (+lsGet(LAST) || 0);
+  const gsiReady = () => !!(window.google && google.accounts && google.accounts.oauth2);
   const gsi = () => gsiP || (gsiP = new Promise((res, rej) => {
-    if (window.google && google.accounts && google.accounts.oauth2) return res();
+    if (gsiReady()) return res();
     const s = document.createElement("script"); s.src = "https://accounts.google.com/gsi/client"; s.async = true;
-    s.onload = res; s.onerror = () => { gsiP = null; rej(new Error("Google bağlantı kodu yüklenemedi (internet?)")); };
+    s.onload = res; s.onerror = () => { gsiP = null; rej(new Error("Google bileşeni yüklenemedi (internet bağlantısını kontrol edin)")); };
     document.head.appendChild(s);
   }));
-  /* Safari: giriş penceresi dokunma anında, beklemeden açılmalı. Bu yüzden Google kodu önceden yüklenir
-     ve requestAccessToken, await olmadan doğrudan çağrılır. */
-  const gsiReady = () => !!(window.google && google.accounts && google.accounts.oauth2);
-  function getToken(interactive){
+  function status(){
+    return unsynced() ? "Bu cihazda Drive'a yüklenmemiş değişiklik var" : lsGet(LAST) ? "Drive ile aynı" : "Henüz Drive'a yüklenmedi";
+  }
+  function paint(){
+    const b = document.getElementById("cloud"), s = document.getElementById("drvstat");
+    const un = unsynced(), at = lsGet(LASTAT);
+    if (b){ b.textContent = un ? "☁ ●" : lsGet(LAST) ? "☁ ✓" : "☁ Drive"; b.title = status() + (at ? " · son işlem: " + tstr(at) : ""); b.style.color = un ? "var(--accent)" : lsGet(LAST) ? "var(--pos)" : ""; }
+    if (s) s.textContent = status() + (at ? " · son yükleme/alma: " + tstr(at) : "");
+  }
+  /* Safari: giriş penceresi dokunma anında açılmalı → requestAccessToken, await olmadan doğrudan çağrılır (Google kodu önceden yüklenmiş olmalı) */
+  function getToken(){
     if (token && Date.now() < exp - 60000) return Promise.resolve(token);
-    if (!clientId()) return Promise.reject(new Error("Önce Ayarlar'dan Google istemci kimliğini girin"));
-    const start = () => new Promise((res, rej) => {
+    return new Promise((res, rej) => {
       const tc = google.accounts.oauth2.initTokenClient({client_id:clientId(), scope:SCOPE,
         callback: r => { if (r.error) return rej(new Error(r.error === "access_denied" ? "İzin verilmedi (Google hesabınız test kullanıcısı olarak ekli mi?)" : r.error)); token = r.access_token; exp = Date.now() + (r.expires_in || 3600) * 1000; res(token); },
-        error_callback: e => rej(new Error(!e ? "Giriş gerekli" : e.type === "popup_closed" ? "Pencere kapatıldı"
-          : e.type === "popup_failed_to_open" ? "Tarayıcı giriş penceresini engelledi. iPhone: Ayarlar → Safari → \"Açılır Pencereleri Engelle\"yi kapatın, sonra ☁'a tekrar dokunun" : "Giriş gerekli (" + e.type + ")"))});
-      tc.requestAccessToken({prompt: interactive ? "" : "none"});
+        error_callback: e => rej(new Error(!e ? "Giriş yapılamadı" : e.type === "popup_closed" ? "Pencere kapatıldı"
+          : e.type === "popup_failed_to_open" ? "Tarayıcı giriş penceresini engelledi. iPhone: Ayarlar → Safari → \"Açılır Pencereleri Engelle\"yi kapatın, sonra tekrar deneyin" : "Giriş yapılamadı (" + e.type + ")"))});
+      tc.requestAccessToken({prompt: ""});
     });
-    return gsiReady() ? start() : gsi().then(start);
   }
   async function api(path, opt = {}){
     const r = await fetch(API + path, {...opt, headers:{Authorization:"Bearer " + token, ...(opt.headers || {})}});
-    if (r.status === 401){ token = null; throw new Error("Oturum süresi doldu"); }
+    if (r.status === 401){ token = null; throw new Error("Oturum süresi doldu, tekrar deneyin"); }
     if (!r.ok) throw new Error("Drive hatası " + r.status);
     return r;
   }
@@ -246,48 +247,54 @@ const Drive = (() => {
     return api("/upload/drive/v3/files?uploadType=multipart", {method:"POST", headers:{"Content-Type":"multipart/related; boundary=" + bd},
       body:`--${bd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${bd}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${bd}--`});
   }
-  async function sync(interactive, initial){
-    if (!clientId() || busy) return;
-    /* arka plan eşitlemesi giriş penceresi açmaz (odağı çalıp formları dondurabilir): süresi dolmuşsa yalnızca ☁ düğmesi uyarır */
-    if (!interactive && !initial && !(token && Date.now() < exp - 60000)){ set("needs", "Drive'a bağlanmak için ☁ düğmesine dokunun"); return; }
-    busy = true; lastRun = Date.now(); set("busy", "Eşitleniyor…");
+  /* mode: "up" = bu cihazdaki veriyi Drive'a yaz, "down" = Drive'daki veriyi bu cihaza al */
+  async function run(mode){
+    if (busy) return;
+    if (!gsiReady()){ gsi().catch(e => alert(e.message)); return alert("Google bileşeni yükleniyor. Birkaç saniye sonra düğmeye tekrar dokunun."); }
+    busy = true; paint();
     try {
-      await getToken(interactive);
+      await getToken();
       const f = await findFile(), remote = f ? await download(f.id) : null;
-      const L = (db.meta && db.meta.updated) || 0, R = (remote && remote.meta && remote.meta.updated) || 0, last = +lsGet(LAST) || 0;
-      let act;
-      if (!remote) act = "up";
-      else if (isEmpty(Object.assign(blank(), db))) act = "down";
-      else if (R === L) act = "none";
-      else if (last && L === last) act = "down";                         /* yalnızca Drive değişmiş (saat karşılaştırması yok: cihaz saatleri farklı olabilir) */
-      else if (last && R === last) act = "up";                          /* yalnızca bu cihaz değişmiş */
-      else act = confirm(`Drive'daki veri (${tstr(R)}) ile bu cihazdaki veri (${tstr(L)}) farklı.\n\nTamam = Drive'daki veriyi bu cihaza al\nİptal = bu cihazdaki veriyi Drive'a yaz\n\nEski hâl her iki durumda da "geri al" olarak saklanır.`) ? "down" : "up";
-      if (act === "down"){
-        db = Object.assign(blank(), remote); persist(); lsSet(LAST, String((db.meta && db.meta.updated) || 0)); render();
-      } else if (act === "up"){
+      const L = localStamp(), R = (remote && remote.meta && remote.meta.updated) || 0, last = +lsGet(LAST) || 0;
+      if (mode === "up"){
+        if (remote && R !== L && R !== last && !confirm(`Drive'daki veri (${tstr(R)}) başka bir cihazdan değiştirilmiş.\nBu cihazdaki veri onun ÜZERİNE YAZILSIN mı?\n\nTamam = üzerine yaz (eski Drive verisi bu cihazda yedeklenir)\nİptal = vazgeç`)) return;
         if (remote) lsSet(KEY + "_drivebak", JSON.stringify(remote));
         if (!db.meta){ db.meta = {updated:Date.now()}; persist(); }
-        await upload(f && f.id, db); lsSet(LAST, String(db.meta.updated));
-      } else lsSet(LAST, String(L));
-      lsSet(CONN, "1"); set("ok", act === "down" ? "Drive'dan güncellendi" : act === "up" ? "Drive'a yazıldı" : "Güncel");
-    } catch(e){
-      const needLogin = interactive ? false : /Giriş gerekli|Oturum|interaction|popup/i.test(e.message);
-      set(needLogin ? "needs" : "err", needLogin ? "Drive'a bağlanmak için ☁ düğmesine dokunun" : e.message);
-      if (interactive) alert("Drive bağlantısı kurulamadı:\n" + e.message);
-    } finally { busy = false; }
+        await upload(f && f.id, db); lsSet(LAST, String(db.meta.updated)); lsSet(LASTAT, String(Date.now()));
+        alert("Veriler Drive'a yüklendi.");
+      } else {
+        if (!remote) return alert("Drive'da kayıtlı veri bulunamadı. Önce diğer cihazdan 'Drive'a yükle' yapın.");
+        if (!isEmpty(Object.assign(blank(), db)) && L !== R && L !== last && !confirm(`Bu cihazda Drive'a yüklenmemiş değişiklikler var (${tstr(L)}).\nDrive'daki veri (${tstr(R)}) bunların ÜZERİNE YAZILSIN mı?\n\nTamam = Drive'dakini al (bu cihazın eski hâli 'geri al' olarak saklanır)\nİptal = vazgeç`)) return;
+        db = Object.assign(blank(), remote); persist(); lsSet(LAST, String((db.meta && db.meta.updated) || 0)); lsSet(LASTAT, String(Date.now()));
+        render(); alert("Drive'daki veriler bu cihaza alındı.");
+      }
+    } catch(e){ alert("Drive işlemi yapılamadı:\n" + e.message); }
+    finally { busy = false; paint(); }
+  }
+  /* ☁ penceresi */
+  function open(){
+    gsi().catch(() => {});   /* kullanıcı Drive penceresini açınca Google bileşeni yüklenir */
+    const d = document.getElementById("dlg");
+    d.innerHTML = `<h3>Google Drive</h3>
+      <p class="muted" style="margin-top:0;font-size:13px">Defterim bu cihazda anında çalışır. Telefon ile bilgisayar arasında veriyi taşımak için aşağıdaki düğmeleri kullanın. Siz basmadan Google'a hiçbir şey gönderilmez.</p>
+      <p style="font-size:14px"><b id="drvstat2"></b></p>
+      <div style="display:grid;gap:8px">
+        <button class="primary" id="dv_up">Drive'a yükle <span style="font-weight:400;font-size:12px">(bu cihazdaki veriyi gönder)</span></button>
+        <button class="ghost" id="dv_down">Drive'dan al <span style="font-weight:400;font-size:12px">(Drive'daki veriyi bu cihaza getir)</span></button>
+      </div>
+      <p class="muted" style="font-size:12px">Her ikisinde de önce karşılaştırma yapılır; farklıysa sorulur, eski hâl yedeklenir.</p>
+      <div class="row"><button class="ghost" id="dv_x">Kapat</button></div>`;
+    document.getElementById("drvstat2").textContent = status() + (lsGet(LASTAT) ? " · son yükleme/alma: " + tstr(lsGet(LASTAT)) : "");
+    document.getElementById("dv_up").onclick = () => run("up");
+    document.getElementById("dv_down").onclick = () => run("down");
+    document.getElementById("dv_x").onclick = () => d.close();
+    d.showModal();
   }
   return {
-    sync, clientId,
-    queue(){ if (!clientId() || !lsGet(CONN)) return; clearTimeout(timer); timer = setTimeout(() => sync(false), 2000); },
-    setClient(v){ v = (v || "").trim(); if (v) lsSet(CID, v); else { lsDel(CID); lsDel(CONN); } token = null; set(v ? "needs" : "off", v ? "Kaydedildi; bağlanmak için ☁ düğmesine dokunun" : "Bağlı değil"); },
-    disconnect(){ if (token && window.google) try { google.accounts.oauth2.revoke(token, () => {}); } catch(e){} token = null; lsDel(CONN); lsDel(LAST); set(clientId() ? "needs" : "off", "Bağlantı kesildi"); },
-    init(){
-      if (clientId()) gsi().catch(() => {});   /* Google kodunu önceden yükle (Safari için gerekli) */
-      if (clientId() && lsGet(CONN)){ set("needs", "Drive'a bağlanmak için ☁ düğmesine dokunun"); sync(false, true); }   /* açılışta bir kez sessiz deneme */
-      else set(clientId() ? "needs" : "off", clientId() ? "Bağlanmak için ☁ düğmesine dokunun" : "Bağlı değil");
-      document.addEventListener("visibilitychange", () => { if (!document.hidden && lsGet(CONN) && Date.now() - lastRun > 20000) sync(false); });
-    },
-    paint
+    clientId, paint, open, up: () => run("up"), down: () => run("down"), prepare: () => gsi().catch(() => {}),
+    setClient(v){ v = (v || "").trim(); if (v) lsSet(CID, v); else lsDel(CID); token = null; paint(); },
+    disconnect(){ if (token && gsiReady()) try { google.accounts.oauth2.revoke(token, () => {}); } catch(e){} token = null; lsDel(LAST); lsDel(LASTAT); paint(); alert("Bağlantı kesildi. Drive'daki dosya silinmedi; yalnızca bu cihazın eşitleme izi temizlendi."); },
+    init(){ paint(); }
   };
 })();
 
@@ -811,12 +818,13 @@ function viewAyar(){
     <button class="ghost mini del" style="margin-left:6px;padding:7px 12px;font-size:14px" onclick="resetAll()">Tüm veriyi sil</button>
   </section>
   <section class="card settings" style="margin-top:14px"><h2>Google Drive eşitleme (telefon ↔ bilgisayar)</h2>
-    <p class="muted" style="margin-top:0">Veri, Drive'ınızdaki uygulamaya özel gizli bir dosyada tutulur; Drive'ın geri kalanına erişilmez. Aynı adresi iPhone'da ve bilgisayarda açıp aynı Google hesabıyla bağlanın.</p>
-    <label class="f">Google OAuth istemci kimliği (Client ID)<input type="text" id="s_cid" value="${esc(Drive.clientId())}" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-    <button class="primary" onclick="Drive.setClient($('#s_cid').value);render()">Kaydet</button>
-    <button class="ghost" onclick="Drive.sync(true)">Şimdi bağlan / eşitle</button>
-    <button class="ghost" onclick="Drive.disconnect()">Bağlantıyı kes</button>
-    <p class="muted" style="font-size:13px">Durum: <b id="drvstat"></b></p>
+    <p class="muted" style="margin-top:0">Defterim bu cihazda tamamen yerelde çalışır. Google'a yalnızca siz <b>Drive'a yükle</b> ya da <b>Drive'dan al</b> dediğinizde bağlanılır; arka planda hiçbir şey gönderilmez. Veri, Drive'ınızdaki uygulamaya özel gizli bir dosyada tutulur; Drive'ın geri kalanına erişilmez.</p>
+    <p style="font-size:14px">Durum: <b id="drvstat"></b></p>
+    <button class="primary" onclick="Drive.open()">Drive'a yükle / Drive'dan al</button>
+    <button class="ghost" onclick="Drive.disconnect()">Eşitleme izini temizle</button>
+    <details style="margin-top:12px"><summary class="muted" style="cursor:pointer;font-size:13px">Gelişmiş: Google istemci kimliği</summary>
+      <label class="f" style="margin-top:8px">Client ID<input type="text" id="s_cid" value="${esc(Drive.clientId())}" placeholder="123456-abc.apps.googleusercontent.com" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <button class="ghost" onclick="Drive.setClient($('#s_cid').value);render()">Kaydet</button></details>
   </section>
   <section class="card" style="margin-top:14px"><h2>Otomatik yedekler (bu tarayıcıda)</h2>
     <p class="muted" style="margin-top:0">Her kayıtta günün son hâli saklanır, son 7 gün tutulur. Ayrıca son değişiklikten önceki hâl "geri al" olarak durur. Bunlar tarayıcı verisiyle birlikte silinir; dosya yedeğinin yerini tutmaz.</p>
@@ -991,7 +999,7 @@ function render(){
 }
 $("#selm").onchange = e => { if (e.target.value){ S.m = e.target.value; render(); } };
 $("#fab").onclick = () => addTx();
-$("#cloud").onclick = () => { if (!Drive.clientId()){ S.tab = "ayar"; render(); } else Drive.sync(true); };
+$("#cloud").onclick = () => Drive.open();
 $("#theme").onclick = () => { const r = document.documentElement, dark = getComputedStyle(r).getPropertyValue("--paper").trim() === "#14181e"; r.dataset.theme = dark ? "light" : "dark"; try { localStorage.setItem("defterim_theme", r.dataset.theme); } catch(e){} };
 try { const t = localStorage.getItem("defterim_theme"); if (t) document.documentElement.dataset.theme = t; } catch(e){}
 load(); render(); Drive.init();
