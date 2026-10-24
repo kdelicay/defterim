@@ -84,12 +84,20 @@ dialog h3{margin-bottom:12px;font-size:20px}
 .sect{display:flex;justify-content:space-between;align-items:center;margin:22px 0 8px}
 .sect h2{font-size:20px}
 .settings label{display:block;max-width:360px}
+.lock{position:fixed;inset:0;z-index:100;background:var(--paper);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto}
+.lock[hidden]{display:none}
+.lock .box{width:min(420px,100%);background:var(--card);border:1px solid var(--rule);border-left:3px double var(--margin);border-radius:8px;padding:22px 24px}
+.lock .box h1{font-size:28px;margin-bottom:6px}.lock .box h1 span{color:var(--accent)}
+body.locked header,body.locked main,body.locked #fab{display:none}
+#lk_msg{margin-bottom:10px;font-size:13px}
+dialog#dlg2{border:1px solid var(--rule);border-radius:10px;background:var(--card);color:var(--ink);padding:20px;width:min(420px,94vw)}
+dialog#dlg2::backdrop{background:rgba(20,15,5,.45)}
 @media (max-width:560px){.kpi b{font-size:19px}.brand h1{font-size:25px}}
 @media (max-width:700px){input,select,textarea{font-size:16px!important}}  /* iPhone: odaklanınca yakınlaşmayı engeller */
 input,select,button{touch-action:manipulation}
 </style>
 </head>
-<body>
+<body class="locked">
 <header>
   <div class="brand">
     <h1>Defter<span>im</span></h1>
@@ -105,6 +113,8 @@ input,select,button{touch-action:manipulation}
 <main id="view"></main>
 <button id="fab">+ İşlem ekle</button>
 <dialog id="dlg"></dialog>
+<dialog id="dlg2"></dialog>
+<div id="lock" class="lock" hidden></div>
 
 <script>
 "use strict";
@@ -166,26 +176,234 @@ document.addEventListener("keydown", e => { if (e.key === "Enter") calcCommit(e.
 const KEY = "defterim_v1";
 const blank = () => ({accounts:[], tx:[], loans:[], taksit:[], rec:[], occ:{}, settings:{base: thisYM() + "-01", goalMonthly:0, goalTotal:0}});
 let db = blank();
-function load(){ try { const r = localStorage.getItem(KEY); if (r) db = Object.assign(blank(), JSON.parse(r)); } catch(e){ console.warn("Okunamadı", e); } }
 const lsGet = k => { try { return localStorage.getItem(k); } catch(e){ return null; } };
-const SNAP = KEY + "_snap_";
-const snapKeys = () => { try { return Object.keys(localStorage).filter(k => k.startsWith(SNAP)).sort(); } catch(e){ return []; } };
+/* ---------- Güvenlik: şifreli kasa (AES-256-GCM + PBKDF2-SHA256, tarayıcının kendi Web Crypto altyapısı) ----------
+   - Veriler parolayla şifrelenmeden hiçbir yere yazılmaz. Parola saklanmaz; yalnızca kasanın kilidini açar.
+   - Kasa: {v, user, salt, iter, iv, ct}. İçerik (ct) = {cur, bak, snaps, driveBak, driveSalt} (JSON).
+   - Drive ve yedek dosyası zarfı: {defterim:1, enc:1, salt, iter, iv, ct}; anahtar = parola + zarftaki tuz. */
+function makeVault(store, cr){
+  const VK = "defterim_vault", ITER = 600000, enc = new TextEncoder(), dec = new TextDecoder();
+  const b64 = u8 => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+  const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const rnd = n => cr.getRandomValues(new Uint8Array(n));
+  async function derive(pass, salt, iter){
+    const base = await cr.subtle.importKey("raw", enc.encode(pass), "PBKDF2", false, ["deriveKey"]);
+    return cr.subtle.deriveKey({name:"PBKDF2", salt, iterations:iter, hash:"SHA-256"}, base, {name:"AES-GCM", length:256}, false, ["encrypt", "decrypt"]);
+  }
+  const seal = async (key, text) => { const iv = rnd(12); return {iv:b64(iv), ct:b64(new Uint8Array(await cr.subtle.encrypt({name:"AES-GCM", iv}, key, enc.encode(text))))}; };
+  const open = async (key, o) => dec.decode(await cr.subtle.decrypt({name:"AES-GCM", iv:unb64(o.iv)}, key, unb64(o.ct)));
+  let key = null, pass = null, salt = null, iter = ITER, user = "", queue = Promise.resolve(), dcache = new Map();
+  const envelope = () => { try { return JSON.parse(store.get(VK)); } catch(e){ return null; } };
+  const wrongPass = () => Object.assign(new Error("Parola yanlış"), {wrong:true});
+
+  async function writeNow(container){
+    const s = await seal(key, JSON.stringify(container));
+    store.set(VK, JSON.stringify({v:1, user, salt:b64(salt), iter, iv:s.iv, ct:s.ct}));
+  }
+  return {
+    exists: () => !!envelope(),
+    info: () => { const e = envelope(); return e ? {user:e.user} : null; },
+    ready: () => !!key,
+    user: () => user,
+    /* yeni kasa kur (kayıt) */
+    async create(u, p, container){
+      salt = rnd(16); iter = ITER; user = u; pass = p; key = await derive(p, salt, iter); dcache.clear();
+      await writeNow(container);
+      const back = await open(key, JSON.parse(store.get(VK)));      // yazılanı geri okuyup doğrula
+      if (JSON.parse(back).cur !== container.cur) throw new Error("Şifreli kayıt doğrulanamadı");
+    },
+    /* kilidi aç; yanlış parolada hata */
+    async unlock(p){
+      const e = envelope(); if (!e) throw new Error("Kasa bulunamadı");
+      const s = unb64(e.salt), k = await derive(p, s, e.iter || ITER);
+      let text; try { text = await open(k, e); } catch(_){ throw wrongPass(); }
+      salt = s; iter = e.iter || ITER; user = e.user; key = k; pass = p; dcache.clear();
+      return JSON.parse(text);
+    },
+    lock(){ key = null; pass = null; salt = null; dcache.clear(); queue = Promise.resolve(); },
+    /* şifreli kaydı sıraya koy (art arda kayıtlar sırayla yazılır) */
+    write(container){ if (!key) return Promise.resolve(); const c = JSON.parse(JSON.stringify(container)); queue = queue.then(() => key ? writeNow(c) : null).catch(err => console.error("Kayıt hatası", err)); return queue; },
+    flush: () => queue,
+    /* parola değiştir: eski parola doğrulanır, yeni tuzla yeniden şifrelenir */
+    async changePass(oldP, newP, container){
+      if (oldP !== pass) throw wrongPass();
+      salt = rnd(16); iter = ITER; pass = newP; key = await derive(newP, salt, iter); dcache.clear();
+      await queue; await writeNow(container);
+    },
+    passMatches: p => p === pass,
+    /* Drive / yedek zarfı */
+    async pack(obj, dsaltB64){
+      const sb = dsaltB64 || b64(rnd(16)), id = sb + "|" + pass;
+      if (!dcache.has(id)) dcache.set(id, await derive(pass, unb64(sb), ITER));
+      const s = await seal(dcache.get(id), JSON.stringify(obj));
+      return {defterim:1, enc:1, salt:sb, iter:ITER, iv:s.iv, ct:s.ct};
+    },
+    isEnvelope: o => !!(o && o.enc === 1 && o.ct && o.iv && o.salt),
+    /* zarfı çöz; p verilmezse oturum parolası kullanılır; yanlışsa hata (wrong:true) */
+    async unpack(env, p){
+      const usePass = p == null ? pass : p, id = env.salt + "|" + usePass;
+      if (!dcache.has(id)) dcache.set(id, await derive(usePass, unb64(env.salt), env.iter || ITER));
+      try { return JSON.parse(await open(dcache.get(id), env)); } catch(_){ dcache.delete(id); throw wrongPass(); }
+    },
+    newSalt: () => b64(rnd(16)),
+    remove(){ store.del(VK); this.lock(); user = ""; }
+  };
+}
+
+const Vault = (window.crypto && crypto.subtle) ? makeVault({get:lsGet, set:(k, v) => localStorage.setItem(k, v), del:k => localStorage.removeItem(k)}, window.crypto) : null;
+/* kasa içeriği (yalnızca bellekte; kilitlenince silinir): cur = şu anki veri (JSON metni), bak = tek adım geri al, snaps = günlük anlık görüntüler */
+const X = {cur:null, bak:null, snaps:{}, driveBak:null, driveSalt:null};
+const resetX = () => { X.cur = null; X.bak = null; X.snaps = {}; X.driveBak = null; X.driveSalt = null; };
+const snapKeys = () => Object.keys(X.snaps).sort();
+const container = () => ({cur:X.cur, bak:X.bak, snaps:X.snaps, driveBak:X.driveBak, driveSalt:X.driveSalt});
+const touchVault = () => { if (Vault && Vault.ready()) Vault.write(container()); };
 function save(){ db.meta = {updated: Math.max(Date.now(), ((db.meta && db.meta.updated) || 0) + 1)}; persist(); Drive.paint(); }
 function persist(){
-  try {
-    db.tx.forEach(t => { if (t.type !== "transfer") delete t.to; });   /* gider/gelirde kalan eski gizli "hedef" alanını temizle */
-    const s = JSON.stringify(db), prev = localStorage.getItem(KEY);
-    if (prev && prev !== s) localStorage.setItem(KEY + "_bak", prev);   /* tek adım geri alma */
-    localStorage.setItem(KEY, s);
-    localStorage.setItem(SNAP + todayISO(), s);                           /* günün son durumu */
-    snapKeys().slice(0, -7).forEach(k => localStorage.removeItem(k));    /* son 7 gün kalsın */
-  } catch(e){ alert("Tarayıcı veriyi kaydedemedi: " + e.message + "\nLütfen Ayarlar'dan yedeği indirin."); }
+  db.tx.forEach(t => { if (t.type !== "transfer") delete t.to; });   /* gider/gelirde kalan eski gizli "hedef" alanını temizle */
+  if (!Vault || !Vault.ready()) return;                              /* kilitliyken yazılmaz */
+  const s = JSON.stringify(db);
+  if (X.cur && X.cur !== s) X.bak = X.cur;                           /* tek adım geri alma */
+  X.cur = s; X.snaps[todayISO()] = s;                                /* günün son durumu */
+  snapKeys().slice(0, -7).forEach(k => delete X.snaps[k]);           /* son 7 gün kalsın */
+  Vault.write(container());                                          /* şifrelenerek yazılır */
 }
 function restoreFrom(key){
-  const raw = lsGet(key); if (!raw) return alert("Yedek bulunamadı.");
+  const raw = key === "bak" ? X.bak : X.snaps[key]; if (!raw) return alert("Yedek bulunamadı.");
   if (!confirm("Mevcut veri bu yedekle değiştirilecek (şimdiki hâli tek adım geri alma olarak saklanır). Devam?")) return;
   db = Object.assign(blank(), JSON.parse(raw)); save(); render();
 }
+/* parola sorma penceresi (Promise<string|null>) */
+function askPassword(msg){
+  return new Promise(res => {
+    const d = document.getElementById("dlg2");
+    d.innerHTML = `<form method="dialog" autocomplete="off"><h3>Parola gerekli</h3><p class="muted" style="margin-top:0;font-size:13px">${esc(msg)}</p>
+      <label class="f">Parola<input type="password" name="p" autocomplete="off" autofocus></label>
+      <div class="row"><button type="button" class="ghost" id="ap_x">Vazgeç</button><button class="primary">Tamam</button></div></form>`;
+    let done = false; const fin = v => { if (!done){ done = true; d.close(); res(v); } };
+    d.querySelector("form").onsubmit = e => { e.preventDefault(); fin(d.querySelector("input").value); };
+    d.querySelector("#ap_x").onclick = () => fin(null); d.oncancel = () => fin(null);
+    d.showModal();
+  });
+}
+
+/* ---------- Kayıt / giriş / kilit ---------- */
+const Sec = (() => {
+  const FAILK = "defterim_fails", el = () => document.getElementById("lock");
+  let lastAct = Date.now(), hiddenAt = 0, watching = false;
+  const autoMs = () => ((db.settings && db.settings.autoLockMin) ?? 5) * 60000;
+  const fails = () => { try { return JSON.parse(lsGet(FAILK)) || {n:0, until:0}; } catch(e){ return {n:0, until:0}; } };
+  const setFails = s => { try { localStorage.setItem(FAILK, JSON.stringify(s)); } catch(e){} };
+  const legacy = () => !!lsGet(KEY);   /* eski, şifresiz kayıt var mı */
+  function show(html){ document.body.classList.add("locked"); const l = el(); l.hidden = false; l.innerHTML = `<div class="box"><h1>Defter<span>im</span></h1>${html}</div>`; }
+  function hide(){ document.body.classList.remove("locked"); el().hidden = true; el().innerHTML = ""; }
+  const msg = (t, ok) => { const m = document.getElementById("lk_msg"); if (!m) return; m.hidden = !t; m.className = ok ? "ok" : "alert"; m.textContent = t || ""; };
+  const busy = (b, label) => { const g = document.getElementById("lk_go"); if (g){ g.disabled = b; if (label) g.textContent = label; } };
+
+  function showRegister(){
+    const lg = legacy();
+    show(`<h2 style="font-size:20px;margin:6px 0 12px">Hesap oluştur</h2>
+      ${lg ? `<div class="ok" style="margin-bottom:12px">Bu cihazda kayıtlı verileriniz bulundu. Hesabı oluşturunca verileriniz <b>şifrelenerek</b> korunur; hiçbir şey silinmez.<br><button type="button" class="mini" id="lk_bk" style="margin-top:6px">Önce şifresiz yedek indir</button></div>` : `<p class="muted" style="margin-top:0;font-size:13px">Verileriniz bu cihazda parolanızla şifrelenir. Parola olmadan kimse okuyamaz.</p>`}
+      <form id="lk_form" autocomplete="on">
+        <label class="f">Kullanıcı adı<input id="lk_u" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required minlength="3"></label>
+        <label class="f">Parola (en az 8 karakter)<input id="lk_p" name="password" type="password" autocomplete="new-password" required minlength="8"></label>
+        <label class="f">Parola (tekrar)<input id="lk_p2" name="password2" type="password" autocomplete="new-password" required minlength="8"></label>
+        <div id="lk_msg" hidden></div>
+        <button class="primary" id="lk_go" style="width:100%">Hesabı oluştur</button>
+      </form>
+      <p class="muted" style="font-size:12px;margin-bottom:0"><b>Önemli:</b> Parolanızı unutursanız verilerinize kimse (ben dahil) ulaşamaz; sıfırlama yoktur. Parolayı güvenli bir yere yazın.</p>`);
+    if (lg) document.getElementById("lk_bk").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([lsGet(KEY)], {type:"application/json"})); a.download = "defterim-yedek-sifresiz-" + todayISO() + ".json"; document.body.appendChild(a); a.click(); a.remove(); };
+    document.getElementById("lk_form").onsubmit = async e => { e.preventDefault();
+      const u = document.getElementById("lk_u").value.trim(), p = document.getElementById("lk_p").value, p2 = document.getElementById("lk_p2").value;
+      if (u.length < 3) return msg("Kullanıcı adı en az 3 karakter olmalı.");
+      if (p.length < 8) return msg("Parola en az 8 karakter olmalı.");
+      if (p !== p2) return msg("Parolalar aynı değil.");
+      if (p.toLowerCase() === u.toLowerCase()) return msg("Parola kullanıcı adıyla aynı olamaz.");
+      busy(true, "Şifreleniyor…"); await new Promise(r => setTimeout(r, 30));
+      try {
+        let cur = JSON.stringify(blank()), bak = null, snaps = {}, driveBak = null;
+        if (legacy()){ cur = lsGet(KEY); JSON.parse(cur); bak = lsGet(KEY + "_bak"); driveBak = lsGet(KEY + "_drivebak");
+          Object.keys(localStorage).filter(k => k.startsWith(KEY + "_snap_")).forEach(k => { snaps[k.slice((KEY + "_snap_").length)] = lsGet(k); }); }
+        await Vault.create(u, p, {cur, bak, snaps, driveBak, driveSalt:Vault.newSalt()});   /* yazıp geri okuyarak doğrular */
+        /* şifreli kayıt doğrulandı → eski şifresiz kopyaları sil */
+        [KEY, KEY + "_bak", KEY + "_drivebak"].concat(Object.keys(localStorage).filter(k => k.startsWith(KEY + "_snap_"))).forEach(k => localStorage.removeItem(k));
+        setFails({n:0, until:0}); await openVault(await Vault.unlock(p));
+      } catch(err){ console.error(err); msg("Hesap oluşturulamadı: " + err.message); busy(false, "Hesabı oluştur"); }
+    };
+  }
+  function showLogin(){
+    const f = fails(), info = Vault.info();
+    show(`<h2 style="font-size:20px;margin:6px 0 4px">Giriş</h2>
+      <p class="muted" style="margin-top:0">Kullanıcı: <b>${esc(info.user)}</b></p>
+      <form id="lk_form" autocomplete="on">
+        <input type="text" name="username" value="${esc(info.user)}" autocomplete="username" hidden>
+        <label class="f">Parola<input id="lk_p" name="password" type="password" autocomplete="current-password" autofocus required></label>
+        <div id="lk_msg" hidden></div>
+        <button class="primary" id="lk_go" style="width:100%">Giriş</button>
+      </form>
+      <details style="margin-top:14px"><summary class="muted" style="cursor:pointer;font-size:13px">Parolamı unuttum</summary>
+        <p class="muted" style="font-size:12px">Parola kurtarılamaz, çünkü veriler sunucuda değil sizin parolanızla şifreli olarak saklanır. Elinizde <b>yedek dosyanız</b> varsa bu cihazdaki kaydı silip yeni hesap kurabilir, yedeği yükleyebilirsiniz.</p>
+        <button type="button" class="ghost" id="lk_reset" style="color:var(--neg)">Bu cihazdaki verileri sil ve yeniden başla</button></details>`);
+    const tick = () => { const w = Math.ceil((fails().until - Date.now()) / 1000); if (w > 0){ msg(`Çok fazla hatalı deneme. ${w} sn sonra tekrar deneyin.`); busy(true); setTimeout(tick, 1000); } else { busy(false, "Giriş"); if (document.getElementById("lk_msg") && document.getElementById("lk_msg").textContent.startsWith("Çok")) msg(""); } };
+    if (f.until > Date.now()) tick();
+    document.getElementById("lk_reset").onclick = () => {
+      if (prompt("Bu cihazdaki TÜM şifreli veriler kalıcı olarak silinecek (Drive ve yedek dosyalarınız etkilenmez). Onaylamak için SİL yazın:") === "SİL"){ Vault.remove(); setFails({n:0, until:0}); location.reload(); } };
+    document.getElementById("lk_form").onsubmit = async e => { e.preventDefault();
+      const st = fails(); if (st.until > Date.now()) return;
+      const p = document.getElementById("lk_p").value; busy(true, "Açılıyor…"); msg("");
+      await new Promise(r => setTimeout(r, 30));
+      try { const c = await Vault.unlock(p); setFails({n:0, until:0}); await openVault(c); }
+      catch(err){
+        if (err.wrong){ const n = st.n + 1, wait = n >= 5 ? Math.min(900, 30 * Math.pow(2, n - 5)) : 0; setFails({n, until: wait ? Date.now() + wait * 1000 : 0});
+          document.getElementById("lk_p").value = ""; busy(false, "Giriş"); msg(wait ? `Parola yanlış. ${wait} sn beklemeniz gerekiyor.` : `Parola yanlış (${n}/5).`); if (wait) tick(); }
+        else { console.error(err); busy(false, "Giriş"); msg("Açılamadı: " + err.message); } }
+    };
+    setTimeout(() => { const p = document.getElementById("lk_p"); if (p) p.focus(); }, 50);
+  }
+  /* kasa açıldı: içeriği belleğe al ve uygulamayı başlat */
+  async function openVault(c){
+    X.cur = c.cur; X.bak = c.bak || null; X.snaps = c.snaps || {}; X.driveBak = c.driveBak || null; X.driveSalt = c.driveSalt || null;
+    db = Object.assign(blank(), JSON.parse(X.cur)); if (!X.driveSalt){ X.driveSalt = Vault.newSalt(); touchVault(); }
+    hide(); lastAct = Date.now(); render(); Drive.init(); watch();
+  }
+  function watch(){
+    if (watching) return; watching = true;
+    ["pointerdown", "keydown", "touchstart", "scroll", "input"].forEach(ev => document.addEventListener(ev, () => { lastAct = Date.now(); }, {passive:true, capture:true}));
+    setInterval(() => { if (Vault.ready() && autoMs() > 0 && Date.now() - lastAct > autoMs()) lockNow(); }, 15000);
+    document.addEventListener("visibilitychange", () => { if (document.hidden) hiddenAt = Date.now();
+      else if (Vault.ready() && autoMs() > 0 && Date.now() - Math.max(hiddenAt, lastAct) > autoMs()) lockNow(); });
+  }
+  async function lockNow(){
+    if (!Vault || !Vault.ready()) return;
+    await Vault.flush(); Vault.lock(); Drive.forget(); db = blank(); resetX();
+    document.querySelectorAll("dialog[open]").forEach(d => d.close());
+    document.getElementById("view").innerHTML = ""; showLogin();
+  }
+  function boot(){
+    if (!Vault){ show(`<h2 style="font-size:20px">Güvenli bağlantı gerekli</h2><p class="muted">Bu tarayıcı şifreleme altyapısını (Web Crypto) bu adreste sunmuyor. Uygulamayı <b>https://kdelicay.github.io/defterim/</b> adresinden açın.</p>`); return; }
+    if (Vault.exists()) showLogin(); else showRegister();
+  }
+  /* ayarlar: otomatik kilit süresi ve parola değiştirme */
+  function saveAutoLock(){ const v = +document.getElementById("s_lock").value; db.settings.autoLockMin = v; save(); alert(v ? `Otomatik kilit: ${v} dakika.` : "Otomatik kilit kapatıldı (yalnızca elle kilitlenir)."); }
+  function changePassUI(){
+    const d = document.getElementById("dlg2");
+    d.innerHTML = `<form method="dialog" autocomplete="off"><h3>Parolayı değiştir</h3>
+      <label class="f">Mevcut parola<input type="password" name="o" autocomplete="off" required></label>
+      <label class="f">Yeni parola (en az 8 karakter)<input type="password" name="n" autocomplete="off" required minlength="8"></label>
+      <label class="f">Yeni parola (tekrar)<input type="password" name="n2" autocomplete="off" required minlength="8"></label>
+      <div id="cp_msg" class="alert" hidden></div>
+      <p class="muted" style="font-size:12px">Bu cihazdaki kasa yeni parolayla yeniden şifrelenir. Drive'daki veri bir sonraki "Drive'a yükle"de yeni parolayla şifrelenir; diğer cihazlarda o zaman yeni parolayı girmeniz istenir.</p>
+      <div class="row"><button type="button" class="ghost" id="cp_x">Vazgeç</button><button class="primary">Değiştir</button></div></form>`;
+    const f = d.querySelector("form"), m = d.querySelector("#cp_msg"), err = t => { m.hidden = false; m.textContent = t; };
+    d.querySelector("#cp_x").onclick = () => d.close();
+    f.onsubmit = async e => { e.preventDefault(); const o = f.o.value, n = f.n.value, n2 = f.n2.value;
+      if (n.length < 8) return err("Yeni parola en az 8 karakter olmalı."); if (n !== n2) return err("Yeni parolalar aynı değil."); if (n === o) return err("Yeni parola eskisiyle aynı olamaz.");
+      if (!Vault.passMatches(o)) return err("Mevcut parola yanlış.");
+      try { await Vault.changePass(o, n, container()); d.close(); alert("Parola değiştirildi."); } catch(ex){ err(ex.wrong ? "Mevcut parola yanlış." : "Değiştirilemedi: " + ex.message); } };
+    d.showModal();
+  }
+  return {boot, lockNow, saveAutoLock, changePassUI};
+})();
+
 const S = {tab:"ozet", m: thisYM(), acc:""};
 
 /* ---------- Google Drive: yalnızca ELLE yükle / al ----------
@@ -247,6 +465,13 @@ const Drive = (() => {
     return api("/upload/drive/v3/files?uploadType=multipart", {method:"POST", headers:{"Content-Type":"multipart/related; boundary=" + bd},
       body:`--${bd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${bd}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${bd}--`});
   }
+  /* Drive'daki zarfı çöz; oturum parolasıyla açılmazsa, verinin şifrelendiği cihazdaki parolayı sor */
+  async function decryptRemote(env){
+    try { return await Vault.unpack(env); } catch(e){ if (!e.wrong) throw e; }
+    const p = await askPassword("Drive'daki veri farklı bir parolayla şifrelenmiş. Veriyi yükleyen cihazdaki parolayı girin:");
+    if (p == null) return null;
+    try { return await Vault.unpack(env, p); } catch(e){ if (e.wrong){ alert("Parola yanlış."); return null; } throw e; }
+  }
   /* mode: "up" = bu cihazdaki veriyi Drive'a yaz, "down" = Drive'daki veriyi bu cihaza al */
   async function run(mode){
     if (busy) return;
@@ -254,17 +479,19 @@ const Drive = (() => {
     busy = true; paint();
     try {
       await getToken();
-      const f = await findFile(), remote = f ? await download(f.id) : null;
+      const f = await findFile(); let remote = f ? await download(f.id) : null, remoteSalt = null;
+      if (remote && Vault.isEnvelope(remote)){ remoteSalt = remote.salt; remote = await decryptRemote(remote); if (remote === null) return; }   /* eski şifresiz kayıt da okunur */
       const L = localStamp(), R = (remote && remote.meta && remote.meta.updated) || 0, last = +lsGet(LAST) || 0;
       if (mode === "up"){
         if (remote && R !== L && R !== last && !confirm(`Drive'daki veri (${tstr(R)}) başka bir cihazdan değiştirilmiş.\nBu cihazdaki veri onun ÜZERİNE YAZILSIN mı?\n\nTamam = üzerine yaz (eski Drive verisi bu cihazda yedeklenir)\nİptal = vazgeç`)) return;
-        if (remote) lsSet(KEY + "_drivebak", JSON.stringify(remote));
+        if (remote){ X.driveBak = JSON.stringify(remote); touchVault(); }
         if (!db.meta){ db.meta = {updated:Date.now()}; persist(); }
-        await upload(f && f.id, db); lsSet(LAST, String(db.meta.updated)); lsSet(LASTAT, String(Date.now()));
+        await upload(f && f.id, await Vault.pack(db, X.driveSalt)); lsSet(LAST, String(db.meta.updated)); lsSet(LASTAT, String(Date.now()));
         alert("Veriler Drive'a yüklendi.");
       } else {
         if (!remote) return alert("Drive'da kayıtlı veri bulunamadı. Önce diğer cihazdan 'Drive'a yükle' yapın.");
         if (!isEmpty(Object.assign(blank(), db)) && L !== R && L !== last && !confirm(`Bu cihazda Drive'a yüklenmemiş değişiklikler var (${tstr(L)}).\nDrive'daki veri (${tstr(R)}) bunların ÜZERİNE YAZILSIN mı?\n\nTamam = Drive'dakini al (bu cihazın eski hâli 'geri al' olarak saklanır)\nİptal = vazgeç`)) return;
+        if (remoteSalt) X.driveSalt = remoteSalt;
         db = Object.assign(blank(), remote); persist(); lsSet(LAST, String((db.meta && db.meta.updated) || 0)); lsSet(LASTAT, String(Date.now()));
         render(); alert("Drive'daki veriler bu cihaza alındı.");
       }
@@ -291,7 +518,7 @@ const Drive = (() => {
     d.showModal();
   }
   return {
-    clientId, paint, open, up: () => run("up"), down: () => run("down"), prepare: () => gsi().catch(() => {}),
+    clientId, paint, open, forget(){ token = null; }, up: () => run("up"), down: () => run("down"), prepare: () => gsi().catch(() => {}),
     setClient(v){ v = (v || "").trim(); if (v) lsSet(CID, v); else lsDel(CID); token = null; paint(); },
     disconnect(){ if (token && gsiReady()) try { google.accounts.oauth2.revoke(token, () => {}); } catch(e){} token = null; lsDel(LAST); lsDel(LASTAT); paint(); alert("Bağlantı kesildi. Drive'daki dosya silinmedi; yalnızca bu cihazın eşitleme izi temizlendi."); },
     init(){ paint(); }
@@ -809,9 +1036,18 @@ function viewAyar(){
     <button class="primary" onclick="saveSettings()">Kaydet</button>
     <p class="muted" style="font-size:12px">Başlangıç tarihinden önceki işlemler ve taksitler bakiyeye eklenmez; girdiğiniz açılış bakiyesi o günün bakiyesidir.</p>
   </section>
+  <section class="card settings" style="margin-top:14px"><h2>Güvenlik</h2>
+    <p style="margin-top:0">Kullanıcı: <b>${esc(Vault ? Vault.user() : "")}</b> · veriler bu cihazda parolanızla şifrelenir (AES-256).</p>
+    <label class="f">Otomatik kilit<select id="s_lock">${[[1,"1 dakika"],[5,"5 dakika"],[15,"15 dakika"],[30,"30 dakika"],[0,"Kapalı (yalnızca elle kilitle)"]].map(([v, l]) => `<option value="${v}"${(g.autoLockMin ?? 5) === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+    <button class="primary" onclick="Sec.saveAutoLock()">Kaydet</button>
+    <button class="ghost" onclick="Sec.lockNow()">Şimdi kilitle</button>
+    <button class="ghost" onclick="Sec.changePassUI()">Parolayı değiştir</button>
+    <p class="muted" style="font-size:12px;margin-bottom:0">Parolayı unutursanız verilere kimse ulaşamaz; sıfırlama yoktur. Yedek dosyanızı güvenli bir yerde tutun.</p>
+  </section>
   <section class="card" style="margin-top:14px"><h2>Yedek</h2>
-    <p class="muted" style="margin-top:0">Veriler yalnızca bu tarayıcıda saklanır. Düzenli yedek alın.</p>
-    <button class="ghost" onclick="exportData()">Yedeği indir (.json)</button>
+    <p class="muted" style="margin-top:0">Veriler bu cihazda parolanızla şifreli saklanır. Düzenli yedek alın; yedek dosyası da varsayılan olarak <b>şifreli</b> iner (geri yüklerken parola gerekir).</p>
+    <button class="ghost" onclick="exportData()">Yedeği indir (şifreli)</button>
+    <button class="ghost" onclick="exportData(true)">Şifresiz yedek indir</button>
     <button class="ghost" onclick="showBackupText()">Yedeği metin olarak göster / kopyala</button>
     <label class="ghost btn" style="display:inline-block;margin-left:6px">Yedeği yükle<input type="file" accept=".json" hidden onchange="importData(this.files[0])"></label>
     <button class="ghost" style="margin-left:6px" onclick="loadDemo()">Örnek veri yükle</button>
@@ -827,10 +1063,10 @@ function viewAyar(){
       <button class="ghost" onclick="Drive.setClient($('#s_cid').value);render()">Kaydet</button></details>
   </section>
   <section class="card" style="margin-top:14px"><h2>Otomatik yedekler (bu tarayıcıda)</h2>
-    <p class="muted" style="margin-top:0">Her kayıtta günün son hâli saklanır, son 7 gün tutulur. Ayrıca son değişiklikten önceki hâl "geri al" olarak durur. Bunlar tarayıcı verisiyle birlikte silinir; dosya yedeğinin yerini tutmaz.</p>
-    ${lsGet(KEY + "_bak") ? `<button class="ghost" onclick="restoreFrom('${KEY}_bak')">Son değişikliği geri al</button>` : ""}
-    <div class="wrap"><table>${snapKeys().reverse().map(k => { let n = "?"; try { n = JSON.parse(lsGet(k)).accounts.length; } catch(e){}
-      return `<tr><td>${trDate(k.slice(SNAP.length))}</td><td>${n} hesap</td><td><button class="mini" onclick="restoreFrom('${k}')">Geri yükle</button></td></tr>`; }).join("") || `<tr><td class="muted">Henüz otomatik yedek yok</td></tr>`}</table></div>
+    <p class="muted" style="margin-top:0">Her kayıtta günün son hâli saklanır, son 7 gün tutulur. Ayrıca son değişiklikten önceki hâl "geri al" olarak durur. Bunlar parolanızla şifrelenmiş olarak saklanır; tarayıcı verisiyle birlikte silinir, dosya yedeğinin yerini tutmaz.</p>
+    ${X.bak ? `<button class="ghost" onclick="restoreFrom('bak')">Son değişikliği geri al</button>` : ""}
+    <div class="wrap"><table>${snapKeys().reverse().map(k => { let n = "?"; try { n = JSON.parse(X.snaps[k]).accounts.length; } catch(e){}
+      return `<tr><td>${trDate(k)}</td><td>${n} hesap</td><td><button class="mini" onclick="restoreFrom('${k}')">Geri yükle</button></td></tr>`; }).join("") || `<tr><td class="muted">Henüz otomatik yedek yok</td></tr>`}</table></div>
   </section>`;
 }
 
@@ -953,25 +1189,47 @@ function delItem(coll, id){
 }
 function saveSettings(){
   const base = $("#s_base").value; if (!base) return alert("Başlangıç tarihi gerekli.");
-  db.settings = {base, goalMonthly: calcEval($("#s_gm").value) || 0, goalTotal: calcEval($("#s_gt").value) || 0, minRate: Math.min(100, Math.max(1, parseFloat($("#s_mr").value) || 40))};
+  db.settings = {...db.settings, base, goalMonthly: calcEval($("#s_gm").value) || 0, goalTotal: calcEval($("#s_gt").value) || 0, minRate: Math.min(100, Math.max(1, parseFloat($("#s_mr").value) || 40))};
   save(); render();
 }
-function exportData(){
-  const a = document.createElement("a"), url = URL.createObjectURL(new Blob([JSON.stringify(db, null, 1)], {type:"application/json"}));
-  a.href = url; a.download = "defterim-yedek-" + todayISO() + ".json"; a.style.display = "none";
+function saveFile(name, text){
+  const a = document.createElement("a"), url = URL.createObjectURL(new Blob([text], {type:"application/json"}));
+  a.href = url; a.download = name; a.style.display = "none";
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000);
-  alert("Yedek indirildi: tarayıcının İndirilenler klasörüne bakın (defterim-yedek-" + todayISO() + ".json).");
 }
-function showBackupText(){
-  const d = $("#dlg"), txt = JSON.stringify(db);
-  d.innerHTML = `<h3>Yedek (metin)</h3><p class="muted" style="margin-top:0;font-size:13px">Bu metni kopyalayıp bir not dosyasına yapıştırın. Geri yüklemek için dosyayı .json olarak kaydedip "Yedeği yükle"yi kullanın.</p>
+/* varsayılan yedek ŞİFRELİdir (parola gerekir); plain=true şifresiz */
+async function exportData(plain){
+  if (plain && !confirm("Şifresiz yedek, verilerinizi PAROLASIZ okunabilir bırakır. Güvenli bir yerde saklayacağınızdan emin misiniz?")) return;
+  try {
+    const name = "defterim-yedek-" + todayISO() + (plain ? "-sifresiz" : "-sifreli") + ".json";
+    saveFile(name, plain ? JSON.stringify(db, null, 1) : JSON.stringify(await Vault.pack(db, X.driveSalt)));
+    alert("Yedek indirildi: " + name + (plain ? "" : "\nBu dosya parolanızla şifrelidir; geri yüklerken parola gerekir."));
+  } catch(e){ alert("Yedek alınamadı: " + e.message); }
+}
+async function showBackupText(){
+  const d = $("#dlg"); let txt;
+  try { txt = JSON.stringify(await Vault.pack(db, X.driveSalt)); } catch(e){ return alert("Yedek hazırlanamadı: " + e.message); }
+  d.innerHTML = `<h3>Yedek (şifreli metin)</h3><p class="muted" style="margin-top:0;font-size:13px">Bu metin parolanızla şifrelidir. Kopyalayıp bir not dosyasına yapıştırın; geri yüklemek için dosyayı .json olarak kaydedip "Yedeği yükle"yi kullanın.</p>
     <textarea id="bk" readonly rows="8" style="width:100%;font:12px monospace;background:var(--paper);color:var(--ink);border:1px solid var(--rule);border-radius:6px;padding:8px">${esc(txt)}</textarea>
     <div class="row"><button class="ghost" id="bkx">Kapat</button><button class="primary" id="bkc">Panoya kopyala</button></div>`;
   $("#bkx").onclick = () => d.close();
   $("#bkc").onclick = async () => { const t = $("#bk"); t.select(); try { await navigator.clipboard.writeText(txt); } catch(e){ document.execCommand("copy"); } $("#bkc").textContent = "Kopyalandı ✓"; };
   d.showModal();
 }
-function importData(f){ if (!f) return; const r = new FileReader(); r.onload = () => { try { const o = JSON.parse(r.result); if (!o.accounts || !o.tx) throw new Error("Geçersiz yedek dosyası"); if (!confirm("Mevcut veri yedekle değiştirilecek. Devam?")) return; db = Object.assign(blank(), o); save(); render(); } catch(e){ alert("Yüklenemedi: " + e.message); } }; r.readAsText(f); }
+function importData(f){
+  if (!f) return; const r = new FileReader();
+  r.onload = async () => { try {
+    let o = JSON.parse(r.result);
+    if (Vault.isEnvelope(o)){
+      try { o = await Vault.unpack(o); }
+      catch(e){ if (!e.wrong) throw e; const p = await askPassword("Bu yedek farklı bir parolayla şifrelenmiş. Yedeğin parolasını girin:"); if (p == null) return; o = await Vault.unpack(JSON.parse(r.result), p); }
+    }
+    if (!o.accounts || !o.tx) throw new Error("Geçersiz yedek dosyası");
+    if (!confirm("Mevcut veri yedekle değiştirilecek (şimdiki hâli 'geri al' olarak saklanır). Devam?")) return;
+    db = Object.assign(blank(), o); save(); render();
+  } catch(e){ alert("Yüklenemedi: " + (e.wrong ? "parola yanlış" : e.message)); } };
+  r.readAsText(f);
+}
 function resetAll(){ if (confirm("Tüm veriler kalıcı olarak silinecek. Emin misiniz?")){ db = blank(); save(); render(); } }
 function loadDemo(){
   if (db.accounts.length && !confirm("Mevcut veri örnek veriyle değiştirilecek. Devam?")) return;
@@ -1002,7 +1260,7 @@ $("#fab").onclick = () => addTx();
 $("#cloud").onclick = () => Drive.open();
 $("#theme").onclick = () => { const r = document.documentElement, dark = getComputedStyle(r).getPropertyValue("--paper").trim() === "#14181e"; r.dataset.theme = dark ? "light" : "dark"; try { localStorage.setItem("defterim_theme", r.dataset.theme); } catch(e){} };
 try { const t = localStorage.getItem("defterim_theme"); if (t) document.documentElement.dataset.theme = t; } catch(e){}
-load(); render(); Drive.init();
+Sec.boot();   /* önce kayıt / giriş ekranı; veri yalnızca doğru parolayla açılır */
 </script>
 </body>
 </html>
