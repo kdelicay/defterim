@@ -884,6 +884,18 @@ function viewIslem(E){
     </select>
     ${accObj ? `<button class="primary" onclick="addTx('${acc}')">+ ${accObj.type === "kart" ? "Bu karta harcama ekle" : "Bu hesaba işlem ekle"}</button>` : ""}</div>`;
   const periods = accObj && accObj.type === "kart" ? cardPeriods(E, accObj) : "";
+  /* seçili hesap/kart için: ay başı bakiye ve her satırdan sonraki bakiye (kartta "borç" olarak, artı = borç) */
+  const isCardAcc = !!accObj && accObj.type === "kart", balSign = isCardAcc ? -1 : 1, afterBal = new Map();
+  let openBal = 0, closeBal = 0;
+  if (accObj){
+    let bal = balancesAt(E, endOf(addM(m, -1)))[acc] || 0; openBal = bal * balSign;
+    list.forEach(e => { if (e.skipped) return; let d = 0;
+      if (e.type === "gelir" && e.account === acc) d = e.amount; else if (e.type === "gider" && e.account === acc) d = -e.amount;
+      else if (e.type === "transfer"){ if (e.account === acc) d -= e.amount; if (e.to === acc) d += e.amount; }
+      bal += d; afterBal.set(e.key, bal * balSign); });
+    closeBal = bal * balSign;
+  }
+  const balCls = v => isCardAcc ? (v > 0.005 ? "neg" : "pos") : cls(v), balLbl = isCardAcc ? "borç" : "bakiye", balGen = isCardAcc ? "borcu" : "bakiyesi";
   const live = list.filter(e => !e.skipped), sum = (rows, type) => rows.filter(e => e.type === type).reduce((s, e) => s + e.amount, 0);
   const done = live.filter(e => e.done), pending = list.filter(e => e.src !== "tx" && !e.done && !e.skipped && e.date <= t);
   const stat = e => e.skipped ? '<span class="tag" style="background:var(--rule);color:var(--mute)">iptal</span>'
@@ -897,7 +909,7 @@ function viewIslem(E){
     const edit = e.src === "tx" ? `editTx('${e.id}')` : `editOcc('${e.key}')`;
     return `<tr${e.skipped ? ' style="opacity:.55"' : ""}><td>${trDate(e.date)}${e.edited && e.date !== e.defDate ? '<br><span class="muted">plan: ' + trDate(e.defDate) + "</span>" : ""}</td>
       <td class="l">${esc(what)}${e.src === "tx" ? `<span class="muted"> ${esc(e.cat || "")}</span>` : ""}<br><span class="muted">${acc}</span></td>
-      <td class="${e.skipped ? "" : c}">${amt}</td><td>${stat(e)}</td>
+      <td class="${e.skipped ? "" : c}">${amt}</td>${accObj ? `<td class="${e.skipped ? "muted" : balCls(afterBal.get(e.key))}">${e.skipped ? "—" : "<b>" + fmt(afterBal.get(e.key)) + "</b>"}</td>` : ""}<td>${stat(e)}</td>
       <td>${e.skipped ? "" : `<button class="mini" onclick="toggleDone('${e.key}')">${e.done ? "Geri al" : "Onayla"}</button> `}<button class="mini" onclick="${edit}">Düzenle</button>${e.src === "tx" ? ` <button class="mini del" onclick="delItem('tx','${e.id}')">Sil</button>` : ""}</td></tr>`; }).join("");
   return `<section class="card"><h2>${lbl(m)} ödeme planı${accObj ? " · " + esc(accObj.name) : ""}</h2>
     ${filterBar}${periods}
@@ -908,7 +920,10 @@ function viewIslem(E){
     </div>
     <p class="muted" style="margin-top:0;font-size:13px">Her satır plana göre hesaplanır. Bir ay için tutarı ya da tarihi <b>Düzenle</b> ile değiştirebilir (ör. kart borcunun tamamını ya da %40'tan fazlasını ödemek), ödeme yapılınca <b>Onayla</b> ile gerçekleşti işaretleyebilirsiniz. Değişiklikler hesapları, kart borçlarını ve sonraki ayları günceller.</p>
     ${pending.length ? `<button class="ghost" onclick="confirmPast()">Tarihi geçen ${pending.length} kalemi gerçekleşti say</button>` : ""}
-  ${list.length ? `<div class="wrap"><table><tr><th>Tarih</th><th class="l">Açıklama</th><th>Tutar</th><th>Durum</th><th></th></tr>${rows}</table></div>` : `<div class="empty">Bu ay işlem yok.</div>`}</section>`;
+  ${list.length || accObj ? `<div class="wrap"><table><tr><th>Tarih</th><th class="l">Açıklama</th><th>Tutar</th>${accObj ? `<th>İşlem sonrası ${balLbl}</th>` : ""}<th>Durum</th><th></th></tr>
+    ${accObj ? `<tr style="background:var(--accent-soft)"><td class="l" colspan="3"><b>${m === db.settings.base.slice(0, 7) ? "Açılış" : "Ay başı"} ${balGen}</b> <span class="muted">(${lbl(m)} başlangıcı)</span></td><td class="${balCls(openBal)}"><b>${fmt(openBal)}</b></td><td colspan="2"></td></tr>` : ""}
+    ${rows}
+    ${accObj ? `<tr style="background:var(--accent-soft)"><td class="l" colspan="3"><b>Ay sonu ${balGen}</b> <span class="muted">(plan)</span></td><td class="${balCls(closeBal)}"><b>${fmt(closeBal)}</b></td><td colspan="2"></td></tr>` : ""}</table></div>` : `<div class="empty">Bu ay işlem yok.</div>`}</section>`;
 }
 
 /* bir planlı kalemin durumunu değiştir */
