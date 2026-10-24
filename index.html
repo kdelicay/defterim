@@ -25,7 +25,7 @@ html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif;
 }
 h1,h2,h3{font-family:Georgia,"Times New Roman",serif;font-weight:700;margin:0}
-header{padding:20px 16px 0;max-width:1100px;margin:0 auto}
+header{padding:20px 16px 0;max-width:1400px;margin:0 auto}
 .brand{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;justify-content:space-between}
 .brand h1{font-size:30px;letter-spacing:.3px}
 .brand h1 span{color:var(--accent)}
@@ -36,7 +36,7 @@ nav{display:flex;gap:2px;margin-top:14px;border-bottom:3px double var(--ink);ove
 nav button{background:none;border:0;padding:9px 14px;font:inherit;font-weight:600;color:var(--mute);cursor:pointer;border-radius:8px 8px 0 0;white-space:nowrap}
 nav button:hover{color:var(--ink)}
 nav button.on{background:var(--card);color:var(--ink);box-shadow:inset 0 3px 0 var(--accent)}
-main{max-width:1100px;margin:0 auto;padding:18px 16px 110px}
+main{max-width:1400px;margin:0 auto;padding:18px 16px 110px}
 .grid{display:grid;gap:14px}
 .kpis{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
 .two{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
@@ -48,8 +48,11 @@ main{max-width:1100px;margin:0 auto;padding:18px 16px 110px}
 .pos{color:var(--pos)} .neg{color:var(--neg)}
 .wrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--mute);text-align:right;padding:6px 8px;border-bottom:2px solid var(--ink);white-space:nowrap}
-td{padding:7px 8px;border-bottom:1px solid var(--rule);text-align:right;white-space:nowrap}
+/* hücreler satır kırar: tablo yana kaydırma gerektirmeden sayfaya sığar (tutarlar boşluksuz olduğu için bölünmez) */
+th{font-size:11.5px;text-transform:uppercase;letter-spacing:.3px;color:var(--mute);text-align:right;padding:6px 6px;border-bottom:2px solid var(--ink);vertical-align:bottom}
+td{padding:7px 6px;border-bottom:1px solid var(--rule);text-align:right;vertical-align:top;overflow-wrap:break-word}
+td .mini{margin:1px 0}
+@media (max-width:700px){table{font-size:13px}td,th{padding:6px 4px}}
 th:first-child,td:first-child{text-align:left}
 td.l,th.l{text-align:left}
 tr.tot td{font-weight:700;border-top:2px solid var(--ink);border-bottom:0}
@@ -148,7 +151,7 @@ function restoreFrom(key){
   if (!confirm("Mevcut veri bu yedekle değiştirilecek (şimdiki hâli tek adım geri alma olarak saklanır). Devam?")) return;
   db = Object.assign(blank(), JSON.parse(raw)); save(); render();
 }
-const S = {tab:"ozet", m: thisYM()};
+const S = {tab:"ozet", m: thisYM(), acc:""};
 
 /* ---------- Google Drive eşitleme ----------
    Veri, kullanıcının Drive'ındaki uygulamaya özel gizli klasörde (appDataFolder) tek bir json dosyası olarak tutulur.
@@ -564,9 +567,37 @@ function viewOzet(E){
   </div>`;
 }
 
+/* Seçili kartın ekstre dönemleri: dönem harcaması, ekstre borcu (kesim günündeki toplam borç), ödeme ve kalan */
+function cardPeriods(E, a){
+  if (!a.due) return `<p class="muted" style="font-size:13px">Ekstre dönemlerini görmek için kartın hesap kesim ve son ödeme günlerini girin (Hesaplar → Düzenle).</p>`;
+  const st = statements(a, 120), t = todayISO(), live = E.filter(e => !e.skipped);
+  let i = st.findIndex(([, d]) => d >= t); if (i < 0) i = st.length - 1;
+  const rows = [];
+  for (let k = Math.max(0, i - 2); k <= Math.min(st.length - 1, i + 2); k++){
+    const [c, d] = st[k], start = k > 0 ? addDays(st[k - 1][0], 1) : db.settings.base;
+    const spend = live.filter(e => e.type === "gider" && e.account === a.id && e.date >= start && e.date <= c).reduce((s, e) => s + e.amount, 0);
+    const S0 = Math.max(0, -balancesAt(E, c)[a.id]);
+    const paid = live.filter(e => e.type === "transfer" && e.to === a.id && e.date > c && e.date <= d).reduce((s, e) => s + e.amount, 0);
+    const tag = c < t ? "kesildi" : start <= t ? "açık dönem" : "gelecek";
+    rows.push(`<tr${tag === "açık dönem" ? ' style="background:var(--accent-soft)"' : ""}><td class="l">${start > c ? "Açılıştan önceki dönem" : trDate(start) + " – " + trDate(c)} ${start > c ? "(" + trDate(c) + ")" : ""}<span class="tag">${tag}</span></td><td>${fmt(spend)}</td><td>${fmt(S0)}</td><td>${trDate(d)}</td><td>${fmt(paid)}</td><td class="${S0 - paid > 0.005 ? "neg" : "pos"}">${fmt(Math.max(0, S0 - paid))}</td></tr>`);
+  }
+  return `<div class="wrap" style="margin-bottom:12px"><table><tr><th class="l">Ekstre dönemi</th><th>Dönem harcaması</th><th>Ekstre borcu</th><th>Son ödeme</th><th>Ödenen</th><th>Kalan</th></tr>${rows.join("")}</table></div>
+    <p class="muted" style="margin:-4px 0 12px;font-size:12px">Dönem harcaması: o dönemde karta yapılan harcama ve taksitler. Ekstre borcu: kesim günündeki toplam borç (önceki dönemden devreden dahil).</p>`;
+}
+
 /* İşlemler = ödeme planı: her satır planlı bir kalemdir; ayı için düzeltilebilir ve "gerçekleşti" diye onaylanabilir */
 function viewIslem(E){
-  const m = S.m, t = todayISO(), list = E.filter(e => e.date.startsWith(m));
+  const m = S.m, t = todayISO(), acc = db.accounts.some(a => a.id === S.acc) ? S.acc : "", accObj = db.accounts.find(a => a.id === acc);
+  const list = E.filter(e => e.date.startsWith(m) && (!acc || e.account === acc || e.to === acc));
+  const filterBar = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+    <label class="muted" for="accf" style="font-size:13px">Hesap / kart:</label>
+    <select id="accf" onchange="S.acc=this.value;render()" style="font:inherit;padding:7px 10px;border:1px solid var(--rule);border-radius:6px;background:var(--paper);color:var(--ink)">
+      <option value="">Tümü</option>
+      <optgroup label="Kredi kartları">${db.accounts.filter(a => a.type === "kart").map(a => `<option value="${a.id}"${a.id === acc ? " selected" : ""}>${esc(a.name)}</option>`).join("")}</optgroup>
+      <optgroup label="Banka ve nakit">${db.accounts.filter(a => a.type !== "kart").map(a => `<option value="${a.id}"${a.id === acc ? " selected" : ""}>${esc(a.name)}</option>`).join("")}</optgroup>
+    </select>
+    ${accObj ? `<button class="primary" onclick="addTx('${acc}')">+ ${accObj.type === "kart" ? "Bu karta harcama ekle" : "Bu hesaba işlem ekle"}</button>` : ""}</div>`;
+  const periods = accObj && accObj.type === "kart" ? cardPeriods(E, accObj) : "";
   const live = list.filter(e => !e.skipped), sum = (rows, type) => rows.filter(e => e.type === type).reduce((s, e) => s + e.amount, 0);
   const done = live.filter(e => e.done), pending = list.filter(e => e.src !== "tx" && !e.done && !e.skipped && e.date <= t);
   const stat = e => e.skipped ? '<span class="tag" style="background:var(--rule);color:var(--mute)">iptal</span>'
@@ -575,14 +606,15 @@ function viewIslem(E){
   const rows = list.map(e => {
     const sign = e.type === "gelir" ? "+" : e.type === "gider" ? "−" : "↔", c = e.type === "gelir" ? "pos" : e.type === "gider" ? "neg" : "";
     const what = e.src === "auto" ? `${e.opening ? "Kart borcu" : "Kart ekstresi"} (${e.mode === "asgari" ? "asgari" : "tam"} ödeme)` : (e.note || e.cat || "");
-    const acc = esc(accName(e.account)) + (e.type === "transfer" ? " → " + esc(accName(e.to)) : "") + (e.src === "tx" && e.type === "gider" && isCard(e.account) ? " · karta harcama (borcu artırır; kart ödemesiyse Düzenle → Tür: Kart borcu ödemesi)" : "");
+    const acc = esc(accName(e.account)) + (e.type === "transfer" ? " → " + esc(accName(e.to)) : "") + (e.src === "tx" && e.type === "gider" && isCard(e.account) ? " · karta harcama (borcu artırır)" : "");
     const amt = e.skipped ? `<s class="muted">${fmt(e.planAmount)}</s>` : `${sign} ${fmt(e.amount)}` + (e.edited && Math.round(e.amount * 100) !== Math.round(e.planAmount * 100) ? `<br><span class="muted">plan: ${fmt(e.planAmount)}</span>` : "");
     const edit = e.src === "tx" ? `editTx('${e.id}')` : `editOcc('${e.key}')`;
     return `<tr${e.skipped ? ' style="opacity:.55"' : ""}><td>${trDate(e.date)}${e.edited && e.date !== e.defDate ? '<br><span class="muted">plan: ' + trDate(e.defDate) + "</span>" : ""}</td>
       <td class="l">${esc(what)}${e.src === "tx" ? `<span class="muted"> ${esc(e.cat || "")}</span>` : ""}<br><span class="muted">${acc}</span></td>
       <td class="${e.skipped ? "" : c}">${amt}</td><td>${stat(e)}</td>
       <td>${e.skipped ? "" : `<button class="mini" onclick="toggleDone('${e.key}')">${e.done ? "Geri al" : "Onayla"}</button> `}<button class="mini" onclick="${edit}">Düzenle</button>${e.src === "tx" ? ` <button class="mini del" onclick="delItem('tx','${e.id}')">Sil</button>` : ""}</td></tr>`; }).join("");
-  return `<section class="card"><h2>${lbl(m)} ödeme planı</h2>
+  return `<section class="card"><h2>${lbl(m)} ödeme planı${accObj ? " · " + esc(accObj.name) : ""}</h2>
+    ${filterBar}${periods}
     <div class="grid kpis" style="margin-bottom:12px">
       ${kpi("Plan gelir", fmt(sum(live, "gelir")), "gerçekleşen: " + fmt(sum(done, "gelir")), "pos")}
       ${kpi("Plan gider", fmt(sum(live, "gider")), "gerçekleşen: " + fmt(sum(done, "gider")), "neg")}
@@ -631,13 +663,15 @@ function editOcc(key){
   d.showModal();
 }
 
+/* bir hesap/kartın hareketlerini İşlemler sekmesinde aç */
+function openAcc(id){ S.acc = id; S.tab = "islem"; render(); window.scrollTo(0, 0); }
 function viewHesap(E){
   const m = S.m, now = balancesAt(E, todayISO()), end = balancesAt(E, endOf(m));
   const bank = db.accounts.filter(a => a.type !== "kart"), cards = db.accounts.filter(a => a.type === "kart");
   const kasaNow = liquid(now), kasaEnd = liquid(end), debtNow = debt(now), debtEnd = debt(end);
   const netNow = kasaNow - debtNow, netEnd = kasaEnd - debtEnd;
   const delta = v => `<td class="${cls(v)}">${v > 0.005 ? "+" : ""}${fmt(v)}</td>`;
-  const act = a => `<td>${a.type === "kart" ? `<button class="mini" onclick="payCard('${a.id}')">Kart ödemesi</button> ` : ""}<button class="mini" onclick="editAcc('${a.id}')">Düzenle</button> <button class="mini del" onclick="delItem('accounts','${a.id}')">Sil</button></td>`;
+  const act = a => `<td>${a.type === "kart" ? `<button class="mini" onclick="addTx('${a.id}')">Harcama ekle</button> <button class="mini" onclick="payCard('${a.id}')">Kart ödemesi</button> ` : ""}<button class="mini" onclick="openAcc('${a.id}')">Hareketler</button> <button class="mini" onclick="editAcc('${a.id}')">Düzenle</button> <button class="mini del" onclick="delItem('accounts','${a.id}')">Sil</button></td>`;
   const bankRow = a => `<tr><td>${esc(a.name)}</td><td class="${cls(now[a.id])}">${fmt(now[a.id])}</td><td class="${cls(end[a.id])}"><b>${fmt(end[a.id])}</b></td>${delta(end[a.id] - now[a.id])}${act(a)}</tr>`;
   const cardRow = a => `<tr><td>${esc(a.name)}</td><td class="${cls(now[a.id])}">${fmt(-now[a.id])}</td><td class="${cls(end[a.id])}"><b>${fmt(-end[a.id])}</b></td>${delta(-(end[a.id] - now[a.id]))}<td>${a.limit ? fmt(a.limit) : "—"}</td><td>${a.cut || "—"} / ${a.due || "—"}</td>${act(a)}</tr>`;
   const verdict = netEnd >= 0
@@ -817,7 +851,9 @@ function txForm(t, onSave){
       return onSave(o); });
 }
 function editTx(id){ const t = db.tx.find(x => x.id === id); txForm(t, o => { delete t.done; Object.assign(t, o); }); }
-function addTx(){ txForm({type:"gider", date:todayISO(), amount:0, account:(db.accounts[0] || {}).id, to:(db.accounts[1] || db.accounts[0] || {}).id, cat:"", note:""}, o => { db.tx.push({id:uid(), ...o}); }); }
+/* accId verilirse (ya da İşlemler'de bir hesap/kart seçiliyse) giriş o hesap/kart için açılır */
+function addTx(accId){ const pre = typeof accId === "string" ? accId : (db.accounts.some(a => a.id === S.acc) && S.tab === "islem" ? S.acc : "");
+  txForm({type:"gider", date:todayISO(), amount:0, account:pre || (db.accounts[0] || {}).id, to:(db.accounts[1] || db.accounts[0] || {}).id, cat:"", note:""}, o => { db.tx.push({id:uid(), ...o}); }); }
 function payCard(id, amt){ const card = db.accounts.find(a => a.id === id), bank = db.accounts.find(a => a.id === card.payAcc) || db.accounts.find(a => a.type !== "kart");
   if (!bank) return alert("Ödeme için önce bir banka hesabı ekleyin.");
   txForm({type:"transfer", date:todayISO(), amount:amt || 0, account:bank.id, to:id, note:"Kart ödemesi"}, o => db.tx.push({id:uid(), ...o})); }
@@ -897,7 +933,7 @@ function render(){
   Drive.paint();
 }
 $("#selm").onchange = e => { if (e.target.value){ S.m = e.target.value; render(); } };
-$("#fab").onclick = addTx;
+$("#fab").onclick = () => addTx();
 $("#cloud").onclick = () => { if (!Drive.clientId()){ S.tab = "ayar"; render(); } else Drive.sync(true); };
 $("#theme").onclick = () => { const r = document.documentElement, dark = getComputedStyle(r).getPropertyValue("--paper").trim() === "#14181e"; r.dataset.theme = dark ? "light" : "dark"; try { localStorage.setItem("defterim_theme", r.dataset.theme); } catch(e){} };
 try { const t = localStorage.getItem("defterim_theme"); if (t) document.documentElement.dataset.theme = t; } catch(e){}
