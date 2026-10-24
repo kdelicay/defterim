@@ -212,8 +212,10 @@ const Drive = (() => {
     return api("/upload/drive/v3/files?uploadType=multipart", {method:"POST", headers:{"Content-Type":"multipart/related; boundary=" + bd},
       body:`--${bd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${bd}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${bd}--`});
   }
-  async function sync(interactive){
+  async function sync(interactive, initial){
     if (!clientId() || busy) return;
+    /* arka plan eşitlemesi giriş penceresi açmaz (odağı çalıp formları dondurabilir): süresi dolmuşsa yalnızca ☁ düğmesi uyarır */
+    if (!interactive && !initial && !(token && Date.now() < exp - 60000)){ set("needs", "Drive'a bağlanmak için ☁ düğmesine dokunun"); return; }
     busy = true; lastRun = Date.now(); set("busy", "Eşitleniyor…");
     try {
       await getToken(interactive);
@@ -247,7 +249,7 @@ const Drive = (() => {
     disconnect(){ if (token && window.google) try { google.accounts.oauth2.revoke(token, () => {}); } catch(e){} token = null; lsDel(CONN); lsDel(LAST); set(clientId() ? "needs" : "off", "Bağlantı kesildi"); },
     init(){
       if (clientId()) gsi().catch(() => {});   /* Google kodunu önceden yükle (Safari için gerekli) */
-      if (clientId() && lsGet(CONN)){ set("needs", "Drive'a bağlanmak için ☁ düğmesine dokunun"); sync(false); }
+      if (clientId() && lsGet(CONN)){ set("needs", "Drive'a bağlanmak için ☁ düğmesine dokunun"); sync(false, true); }   /* açılışta bir kez sessiz deneme */
       else set(clientId() ? "needs" : "off", clientId() ? "Bağlanmak için ☁ düğmesine dokunun" : "Bağlı değil");
       document.addEventListener("visibilitychange", () => { if (!document.hidden && lsGet(CONN) && Date.now() - lastRun > 20000) sync(false); });
     },
@@ -793,10 +795,10 @@ function viewAyar(){
 /* ---------- formlar ---------- */
 function form(title, fields, vals, onSave){
   const d = $("#dlg");
-  d.innerHTML = `<form><h3>${title}</h3>${fields.map(f => {
+  d.innerHTML = `<form autocomplete="off" data-lpignore="true" data-1p-ignore><h3>${title}</h3>${fields.map(f => {
     const v = vals[f.k] ?? "";
     const inp = f.t === "select" ? `<select name="${f.k}">${f.opts.map(([o, l]) => `<option value="${esc(o)}"${o == v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`
-      : `<input name="${f.k}" type="${f.t}" value="${esc(v)}"${f.t === "number" ? ' step="0.01"' : ""}${f.list ? ` list="${f.list}"` : ""}${f.req ? " required" : ""}>`;
+      : `<input name="${f.k}" type="${f.t}" value="${esc(v)}" autocomplete="off"${f.t === "number" ? ' step="0.01"' : ""}${f.list ? ` list="${f.list}"` : ""}${f.req ? " required" : ""}>`;
     return `<label class="f" data-k="${f.k}">${f.l}${inp}</label>`; }).join("")}
     <datalist id="cats">${["Maaş","Ek gelir","Market","Fatura","Kira","Ulaşım","Sağlık","Eğitim","Eğlence","Giyim","Yemek","Diğer"].map(c => `<option>${c}</option>`).join("")}</datalist>
     <div class="row"><button type="button" class="ghost" id="cx">Vazgeç</button><button class="primary">Kaydet</button></div></form>`;
