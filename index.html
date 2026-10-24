@@ -662,6 +662,10 @@ function monthPayments(E, m){
         acc:accName(e.account) + (p ? " · karttan, ekstre ödemesi " + trDate(p[1]) : " · karttan")});
       return;
     }
+    if (d > 0.005){   /* kasaya giren: gelir ya da karttan çekilen nakit */
+      rows.push({date:e.date, done:e.done, amount:d, kasa:run, income:true, what: e.type === "transfer" ? (e.note || "Gelen transfer") : (e.note || e.cat || "Gelir"), acc:accName(e.account)});
+      return;
+    }
     if (d >= -0.005) return;
     const toCard = e.type === "transfer";
     rows.push({date:e.date, done:e.done, amount:-d, kasa:run,
@@ -786,8 +790,9 @@ function viewOzet(E){
     <p class="muted" style="margin:10px 0 0;font-size:13px"><b>Aylık birikim (${fmt(net)}) = gelir − gider</b> ve kasa − kart borcu farkındaki (net varlık) artışa eşittir: ${fmt(open - debtOpen)} → ${fmt(netEndV)}.
     Kart borcu ödemesi <b>gider sayılmaz</b>: kasadan çıkar ama borcu aynı tutarda azaltır. Bu yüzden kasa düşerken birikim artıda görünebilir; kasanın düşmesinin sebebi, önceki aylardan kalan kart borcunu ödemenizdir (${fmt(bPay)}).</p></section>`;
 
-  const upAll = monthPayments(E, m), up = upAll, cashRows = upAll.filter(u => !u.card);
+  const upAll = monthPayments(E, m), up = upAll, cashRows = upAll.filter(u => !u.card && !u.income), incRows = upAll.filter(u => u.income);
   const upTot = cashRows.reduce((s, u) => s + u.amount, 0), upLeft = cashRows.filter(u => !u.done).reduce((s, u) => s + u.amount, 0);
+  const incTot = incRows.reduce((s, u) => s + u.amount, 0), incLeft = incRows.filter(u => !u.done).reduce((s, u) => s + u.amount, 0);
   const cardSum = upAll.filter(u => u.card).reduce((s, u) => s + u.amount, 0), cardLeft = upAll.filter(u => u.card && !u.done).reduce((s, u) => s + u.amount, 0);
   const cats = {}; E.filter(e => e.type === "gider" && e.date.startsWith(m)).forEach(e => cats[e.cat || "Diğer"] = (cats[e.cat || "Diğer"] || 0) + e.amount);
   const cl = Object.entries(cats).sort((a, b) => b[1] - a[1]), cmax = cl.length ? cl[0][1] : 1;
@@ -812,9 +817,12 @@ function viewOzet(E){
       ${db.accounts.filter(a => a.type !== "kart").map(a => `<tr><td>${esc(a.name)}</td><td class="${cls(bAct[a.id])}">${fmt(bAct[a.id])}</td><td class="${cls(bNow[a.id])}">${fmt(bNow[a.id])}</td><td class="${cls(bEnd[a.id])}">${fmt(bEnd[a.id])}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">Hesap yok</td></tr>`}
       <tr class="tot"><td>Toplam kasa</td><td class="${cls(liquid(bAct))}">${fmt(liquid(bAct))}</td><td class="${cls(liquid(bNow))}">${fmt(liquid(bNow))}</td><td class="${cls(liquid(bEnd))}">${fmt(liquid(bEnd))}</td></tr>
     </table></div></section>
-    <section class="card"><h2>${lbl(m)} ödemeleri <span class="neg">${fmt(upTot)}</span></h2>
-      ${up.length ? `<div class="wrap"><table><tr><th>Tarih</th><th class="l">Ödeme</th><th>Tutar</th><th>Ödeme sonrası kasa</th></tr>${up.map(u => `<tr${u.done ? ' style="opacity:.6"' : ""}><td class="l">${trDate(u.date)}${u.card ? '<span class="tag">kart</span>' : u.done ? '<span class="tag">gerçekleşti</span>' : '<span class="tag">plan</span>'}</td><td class="l">${esc(u.what)}<br><span class="muted">${esc(u.acc)}</span></td><td${u.card ? ' class="muted"' : ""}>${fmt(u.amount)}</td><td class="${u.kasa === null || u.card ? "muted" : cls(u.kasa)}">${u.card ? "kasadan çıkmaz" : `<b>${u.kasa === null ? "—" : fmt(u.kasa)}</b>`}</td></tr>`).join("")}</table></div>
-      <p class="muted" style="margin:8px 0 0;font-size:12px">Kasadan çıkan, ödenmemiş kalan: <b class="neg">${fmt(upLeft)}</b>. Kasa, o ana kadarki gelirler ve ödemeler dahil banka + nakit toplamıdır.${cardSum ? ` Karta yansıyan harcama: <b>${fmt(cardSum)}</b> (henüz yapılmamış: ${fmt(cardLeft)}); kasadan, ilgili ekstre ödenince çıkar ve o ayın listesinde "Kart ekstresi" olarak görünür.` : ""}</p>` : `<div class="empty">Bu ay ödeme yok</div>`}
+    <section class="card"><h2>${lbl(m)} gelir ve ödemeleri <span><span class="pos">+${fmt(incTot)}</span> / <span class="neg">−${fmt(upTot)}</span></span></h2>
+      ${up.length ? `<div class="wrap"><table><tr><th>Tarih</th><th class="l">Gelir / ödeme</th><th>Tutar</th><th>İşlem sonrası kasa</th></tr>
+      <tr style="background:var(--accent-soft)"><td class="l" colspan="3"><b>Ay başı kasa</b> <span class="muted">(${lbl(m)} başlangıcı, önceki aydan devir)</span></td><td class="${cls(open)}"><b>${fmt(open)}</b></td></tr>
+      ${up.map(u => `<tr${u.done ? ' style="opacity:.6"' : ""}><td class="l">${trDate(u.date)}${u.card ? '<span class="tag">kart</span>' : u.done ? '<span class="tag">gerçekleşti</span>' : '<span class="tag">plan</span>'}</td><td class="l">${esc(u.what)}<br><span class="muted">${esc(u.acc)}</span></td><td class="${u.card ? "muted" : u.income ? "pos" : "neg"}">${u.card ? "" : u.income ? "+ " : "− "}${fmt(u.amount)}</td><td class="${u.kasa === null || u.card ? "muted" : cls(u.kasa)}">${u.card ? "kasadan çıkmaz" : `<b>${u.kasa === null ? "—" : fmt(u.kasa)}</b>`}</td></tr>`).join("")}
+      <tr style="background:var(--accent-soft)"><td class="l" colspan="3"><b>Ay sonu kasa</b> <span class="muted">(plan, sonraki aya devir)</span></td><td class="${cls(cur.kasa)}"><b>${fmt(cur.kasa)}</b></td></tr></table></div>
+      <p class="muted" style="margin:8px 0 0;font-size:12px">Henüz gerçekleşmemiş: gelir <b class="pos">${fmt(incLeft)}</b>, ödeme <b class="neg">${fmt(upLeft)}</b>. Kasa, o ana kadarki gelirler ve ödemeler dahil banka + nakit toplamıdır.${cardSum ? ` Karta yansıyan harcama: <b>${fmt(cardSum)}</b> (henüz yapılmamış: ${fmt(cardLeft)}); kasadan, ilgili ekstre ödenince çıkar ve o ayın listesinde "Kart ekstresi" olarak görünür.` : ""}</p>` : `<div class="empty">Bu ay ödeme yok</div>`}
     </section>
   </div>
   <section class="card" style="margin-top:14px"><h2>Kredi kartları</h2>
