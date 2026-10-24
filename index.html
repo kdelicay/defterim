@@ -139,6 +139,7 @@ const snapKeys = () => { try { return Object.keys(localStorage).filter(k => k.st
 function save(){ db.meta = {updated: Math.max(Date.now(), ((db.meta && db.meta.updated) || 0) + 1)}; persist(); Drive.queue(); }
 function persist(){
   try {
+    db.tx.forEach(t => { if (t.type !== "transfer") delete t.to; });   /* gider/gelirde kalan eski gizli "hedef" alanını temizle */
     const s = JSON.stringify(db), prev = localStorage.getItem(KEY);
     if (prev && prev !== s) localStorage.setItem(KEY + "_bak", prev);   /* tek adım geri alma */
     localStorage.setItem(KEY, s);
@@ -268,7 +269,9 @@ function sched(base, key){
 function events(){
   const base = db.settings.base, tdy = todayISO(), ev = [];
   /* elle girilen işlem: tarihi geçtiyse gerçekleşmiş sayılır; t.done ile elle değiştirilebilir */
-  db.tx.forEach(t => ev.push({...t, src:"tx", key:"tx:" + t.id, defDate:t.date, planAmount:t.amount, done: t.done === undefined ? t.date <= tdy : !!t.done}));
+  db.tx.forEach(t => { const e = {...t, src:"tx", key:"tx:" + t.id, defDate:t.date, planAmount:t.amount, done: t.done === undefined ? t.date <= tdy : !!t.done};
+    if (e.type !== "transfer") delete e.to;   /* eski kayıtlarda gider/gelirde kalan gizli "hedef" alanı */
+    ev.push(e); });
   db.loans.forEach(l => { for (let k = 0; k < l.count; k++)
     ev.push(sched({date:dateIn(addM(l.start, k), l.day), type:"gider", amount:l.amount, account:l.account, cat:"Kredi", note:`${l.name} ${k+1}/${l.count}`, src:"loan", sid:l.id}, `loan:${l.id}:${k}`)); });
   db.taksit.forEach(t => { const per = t.total / t.count; for (let k = 0; k < t.count; k++)
@@ -601,7 +604,7 @@ function cardPeriods(E, a){
 /* İşlemler = ödeme planı: her satır planlı bir kalemdir; ayı için düzeltilebilir ve "gerçekleşti" diye onaylanabilir */
 function viewIslem(E){
   const m = S.m, t = todayISO(), acc = db.accounts.some(a => a.id === S.acc) ? S.acc : "", accObj = db.accounts.find(a => a.id === acc);
-  const list = E.filter(e => e.date.startsWith(m) && (!acc || e.account === acc || e.to === acc));
+  const list = E.filter(e => e.date.startsWith(m) && (!acc || e.account === acc || (e.type === "transfer" && e.to === acc)));   /* "hedef" yalnızca transferde anlamlı */
   const filterBar = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
     <label class="muted" for="accf" style="font-size:13px">Hesap / kart:</label>
     <select id="accf" onchange="S.acc=this.value;render()" style="font:inherit;padding:7px 10px;border:1px solid var(--rule);border-radius:6px;background:var(--paper);color:var(--ink)">
@@ -845,6 +848,7 @@ function txForm(t, onSave){
         src: t.type === "transfer" ? t.account : (db.accounts[0] || {}).id, doneSel: t.done === undefined ? "auto" : t.done ? "1" : "0"}; })(),
     ({doneSel, srcBank, toCard, src, ...o}) => {
       if (doneSel === "1") o.done = true; else if (doneSel === "0") o.done = false;
+      if (o.type === "gider" || o.type === "gelir") delete o.to;   /* hedef hesap yalnızca transfer ve kart ödemesinde kullanılır */
       if (o.type === "kartodeme"){
         if (!srcBank || !toCard) return warn("Kart ödemesi için bir banka/nakit hesabı ve bir kredi kartı gerekli.");
         o.type = "transfer"; o.account = srcBank; o.to = toCard;
