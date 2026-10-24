@@ -575,14 +575,18 @@ function cardPeriods(E, a){
   const rows = [];
   for (let k = Math.max(0, i - 2); k <= Math.min(st.length - 1, i + 2); k++){
     const [c, d] = st[k], start = k > 0 ? addDays(st[k - 1][0], 1) : db.settings.base;
+    if (d < db.settings.base) continue;   /* son ödeme günü başlangıç tarihinden önce olan dönemler gösterilmez */
     const spend = live.filter(e => e.type === "gider" && e.account === a.id && e.date >= start && e.date <= c).reduce((s, e) => s + e.amount, 0);
     const S0 = Math.max(0, -balancesAt(E, c)[a.id]);
-    const paid = live.filter(e => e.type === "transfer" && e.to === a.id && e.date > c && e.date <= d).reduce((s, e) => s + e.amount, 0);
+    /* bu ekstreye yapılan ödemeler: kesimden sonraki kesime kadar (son ödeme gününden sonra yapılan gecikmeli ödemeler de dahil) */
+    const cNext = k + 1 < st.length ? st[k + 1][0] : d;
+    const pays = live.filter(e => e.type === "transfer" && e.to === a.id && e.date > c && e.date <= cNext);
+    const paid = pays.reduce((s, e) => s + e.amount, 0), late = pays.filter(e => e.date > d).reduce((s, e) => s + e.amount, 0);
     const tag = c < t ? "kesildi" : start <= t ? "açık dönem" : "gelecek";
-    rows.push(`<tr${tag === "açık dönem" ? ' style="background:var(--accent-soft)"' : ""}><td class="l">${start > c ? "Açılıştan önceki dönem" : trDate(start) + " – " + trDate(c)} ${start > c ? "(" + trDate(c) + ")" : ""}<span class="tag">${tag}</span></td><td>${fmt(spend)}</td><td>${fmt(S0)}</td><td>${trDate(d)}</td><td>${fmt(paid)}</td><td class="${S0 - paid > 0.005 ? "neg" : "pos"}">${fmt(Math.max(0, S0 - paid))}</td></tr>`);
+    rows.push(`<tr${tag === "açık dönem" ? ' style="background:var(--accent-soft)"' : ""}><td class="l">${start > c ? "Açılıştan önceki dönem" : trDate(start) + " – " + trDate(c)} ${start > c ? "(" + trDate(c) + ")" : ""}<span class="tag">${tag}</span></td><td>${fmt(spend)}</td><td>${fmt(S0)}</td><td>${trDate(d)}</td><td>${fmt(paid)}${late > 0.005 ? `<br><span class="muted">son ödeme gününden sonra: ${fmt(late)}</span>` : ""}</td><td class="${S0 - paid > 0.005 ? "neg" : "pos"}">${fmt(Math.max(0, S0 - paid))}</td></tr>`);
   }
   return `<div class="wrap" style="margin-bottom:12px"><table><tr><th class="l">Ekstre dönemi</th><th>Dönem harcaması</th><th>Ekstre borcu</th><th>Son ödeme</th><th>Ödenen</th><th>Kalan</th></tr>${rows.join("")}</table></div>
-    <p class="muted" style="margin:-4px 0 12px;font-size:12px">Dönem harcaması: o dönemde karta yapılan harcama ve taksitler. Ekstre borcu: kesim günündeki toplam borç (önceki dönemden devreden dahil).</p>`;
+    <p class="muted" style="margin:-4px 0 12px;font-size:12px">Dönem harcaması: o dönemde karta yapılan harcama ve taksitler. Ekstre borcu: kesim günündeki toplam borç (önceki dönemden devreden dahil). Ödenen: kesimden sonraki kesime kadar yapılan tüm ödemeler; son ödeme gününden sonrakiler ayrıca belirtilir. Kalan tutar, bir sonraki ekstreye devreder.</p>`;
 }
 
 /* İşlemler = ödeme planı: her satır planlı bir kalemdir; ayı için düzeltilebilir ve "gerçekleşti" diye onaylanabilir */
