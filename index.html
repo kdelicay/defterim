@@ -280,7 +280,9 @@ function events(){
   const out = ev.filter(e => e.date >= base).sort(byDate);
   const autoCards = db.accounts.filter(a => a.type === "kart" && a.due && db.accounts.some(x => x.id === a.payAcc && x.type !== "kart"));
   /* o dönemde kullanıcının kendi girdiği kart ödemeleri (transfer) planlanan ödemeden düşülür; çift sayım olmaz */
-  const manualPaid = (a, from, to) => out.filter(e => e.src === "tx" && e.type === "transfer" && e.to === a.id && e.date >= from && e.date <= to).reduce((s, e) => s + e.amount, 0);
+  const manual = {};   /* kart başına elle girilen ödemeler (bir kez gruplanır) */
+  out.forEach(e => { if (e.src === "tx" && e.type === "transfer") (manual[e.to] = manual[e.to] || []).push(e); });
+  const manualPaid = (a, from, to) => (manual[a.id] || []).reduce((s, e) => e.date >= from && e.date <= to ? s + e.amount : s, 0);
   const label = (a, mode, open) => `${open ? "Kart borcu ödemesi" : "Otomatik kart ödemesi"} (${mode}) · ${a.name}`;
   /* açılış borcu = kapanmış önceki ekstre: açılış ayındaki son ödeme gününde ödenir (tam ya da asgari) */
   autoCards.filter(a => a.opening < -0.005).forEach(a => {
@@ -317,13 +319,20 @@ function setOcc(key, patch){
 }
 const minRate = () => (db.settings.minRate ?? 40) / 100;
 /* kartın (kesim tarihi, son ödeme tarihi) çiftleri; dönemler sırayla gelir */
+const stCache = new Map();   /* ekstre takvimi kart ayarına bağlıdır; her çağrıda yeniden hesaplamamak için saklanır */
 function statements(a, n){
-  const out = [], cutDay = a.cut || a.due; let ym = addM(db.settings.base.slice(0, 7), -1);
-  for (let k = 0; k < n; k++, ym = addM(ym, 1)){
-    const c = dateIn(ym, cutDay), d = a.due > cutDay ? dateIn(ym, a.due) : dateIn(addM(ym, 1), a.due);
-    out.push([c, d]);
+  const cutDay = a.cut || a.due, key = a.id + "|" + cutDay + "|" + a.due + "|" + db.settings.base;
+  let all = stCache.get(key);
+  if (!all || all.length < n){
+    all = []; let ym = addM(db.settings.base.slice(0, 7), -1);
+    for (let k = 0; k < Math.max(n, 120); k++, ym = addM(ym, 1)){
+      const c = dateIn(ym, cutDay), d = a.due > cutDay ? dateIn(ym, a.due) : dateIn(addM(ym, 1), a.due);
+      all.push([c, d]);
+    }
+    if (stCache.size > 200) stCache.clear();
+    stCache.set(key, all);
   }
-  return out;
+  return all.length > n ? all.slice(0, n) : all;
 }
 /* şu an ödenmesi gereken ekstre: son ödeme günü bugünden önce olmayan ilk dönem */
 function stmt(E, a){
