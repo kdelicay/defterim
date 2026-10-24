@@ -128,6 +128,40 @@ const endOf = ym => ym + "-" + pad(dim(ym));
 const addDays = (iso, n) => { const d = new Date(iso + "T12:00:00"); d.setDate(d.getDate() + n); return d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()); };
 const trDate = iso => iso.slice(8) + "." + iso.slice(5, 7) + "." + iso.slice(0, 4);
 
+/* ---------- tutar alanlarında hesap makinesi: + − * / ve parantez (eval kullanılmaz) ----------
+   "1750*2" → 3500. Ondalık için virgül ya da nokta; "1.750" binlik ayracı sayılır, "1.5" ondalıktır. */
+function calcNum(t){
+  if (t.includes(".") && t.includes(","))   /* ikisi birden varsa, sonda gelen ayraç ondalıktır: 1.750,50 ve 1,750.50 */
+    t = t.lastIndexOf(",") > t.lastIndexOf(".") ? t.replace(/\./g, "").replace(",", ".") : t.replace(/,/g, "");
+  else if (t.includes(",")){ if ((t.match(/,/g) || []).length > 1) return NaN; t = t.replace(",", "."); }
+  else if (/^[1-9]\d{0,2}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, "");
+  return /^\d+(\.\d+)?$/.test(t) ? parseFloat(t) : NaN;
+}
+function calcEval(src){
+  const s = String(src ?? "").trim().replace(/₺|TL/gi, "").replace(/[×xX]/g, "*").replace(/[÷:]/g, "/").replace(/\s+/g, "");
+  if (!s) return NaN;
+  const tok = s.match(/\d[\d.,]*|[-+*/()]|./g).map(t => /^\d/.test(t) ? calcNum(t) : t);
+  let i = 0;
+  const factor = () => { const t = tok[i++];
+    if (t === undefined) return NaN; if (t === "-") return -factor(); if (t === "+") return factor();
+    if (t === "("){ const v = expr(); return tok[i++] === ")" ? v : NaN; }
+    return typeof t === "number" ? t : NaN; };
+  const term = () => { let v = factor(); while (tok[i] === "*" || tok[i] === "/"){ const o = tok[i++], r = factor(); v = o === "*" ? v * r : v / r; } return v; };
+  const expr = () => { let v = term(); while (tok[i] === "+" || tok[i] === "-"){ const o = tok[i++], r = term(); v = o === "+" ? v + r : v - r; } return v; };
+  const v = expr();
+  return i === tok.length && isFinite(v) ? Math.round(v * 100) / 100 : NaN;
+}
+const fmtPlain = v => String(Math.round((+v || 0) * 100) / 100).replace(".", ",");
+const isExpr = s => /[-+*/()xX×÷:]/.test(String(s).trim().replace(/^[-+]/, ""));
+document.addEventListener("input", e => { const el = e.target;
+  if (!(el.matches && el.matches("input[data-calc]"))) return;
+  let h = el.nextElementSibling; if (!h || !h.classList.contains("calc-hint")){ h = document.createElement("small"); h.className = "calc-hint muted"; el.after(h); }
+  const v = calcEval(el.value); h.textContent = !isExpr(el.value) ? "" : isNaN(v) ? "İşlem anlaşılamadı" : "= " + fmt(v); });
+const calcCommit = el => { if (!el.matches || !el.matches("input[data-calc]")) return;
+  const v = calcEval(el.value); if (!isNaN(v) && el.value.trim()){ el.value = fmtPlain(v); const h = el.nextElementSibling; if (h && h.classList.contains("calc-hint")) h.textContent = ""; } };
+document.addEventListener("focusout", e => calcCommit(e.target));
+document.addEventListener("keydown", e => { if (e.key === "Enter") calcCommit(e.target); });
+
 /* ---------- veri ---------- */
 const KEY = "defterim_v1";
 const blank = () => ({accounts:[], tx:[], loans:[], taksit:[], rec:[], occ:{}, settings:{base: thisYM() + "-01", goalMonthly:0, goalTotal:0}});
@@ -662,7 +696,7 @@ function editOcc(key){
   d.innerHTML = `<form><h3>${esc(title)}</h3>
     <p class="muted" style="margin-top:0;font-size:13px">Plan tutarı: <b>${fmt(e.planAmount)}</b> · plan tarihi: ${trDate(e.defDate)} · ${esc(accName(e.account))}${e.type === "transfer" ? " → " + esc(accName(e.to)) : ""}</p>
     <label class="f">Tarih<input type="date" name="date" value="${e.date}" required></label>
-    <label class="f">Tutar (₺)<input type="number" step="0.01" name="amount" value="${(+cur).toFixed(2)}" required></label>
+    <label class="f">Tutar (₺) — işlem yazabilirsiniz: 1750*2<input type="text" inputmode="decimal" data-calc name="amount" value="${fmtPlain(cur)}" autocomplete="off" required></label>
     ${card ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin:-4px 0 10px">
       <button type="button" class="mini" data-fill="${(e.minAmount || 0).toFixed(2)}">Asgari %${Math.round(minRate() * 100)}: ${fmt(e.minAmount || 0)}</button>
       <button type="button" class="mini" data-fill="${(e.fullAmount || 0).toFixed(2)}">Tam borç: ${fmt(e.fullAmount || 0)}</button></div>` : ""}
@@ -674,7 +708,7 @@ function editOcc(key){
   $("#oc_x").onclick = () => d.close();
   $("#oc_reset").onclick = () => { if (confirm("Bu ayın değişiklikleri silinip plana dönülsün mü?")){ setOcc(key, {amount:null, date:null, done:false, skip:false}); d.close(); save(); render(); } };
   fm.onsubmit = ev => { ev.preventDefault();
-    const amount = parseFloat(String(fm.elements.amount.value).replace(",", ".")), date = fm.elements.date.value, st = fm.elements.state.value;
+    const amount = calcEval(fm.elements.amount.value), date = fm.elements.date.value, st = fm.elements.state.value;
     if (!(amount >= 0) || !date) return alert("Tutar ve tarih gerekli.");
     setOcc(key, {amount: Math.round(amount * 100) !== Math.round(e.planAmount * 100) ? amount : null, date: date !== e.defDate ? date : null, done: st === "done", skip: st === "skip"});
     d.close(); save(); render(); };
@@ -762,8 +796,8 @@ function viewAyar(){
   const g = db.settings;
   return `<section class="card settings"><h2>Planlama ayarları</h2>
     <label class="f">Başlangıç tarihi (açılış bakiyelerinin geçerli olduğu gün)<input type="date" id="s_base" value="${g.base}"></label>
-    <label class="f">Aylık birikim hedefi (₺)<input type="number" step="0.01" id="s_gm" value="${g.goalMonthly}"></label>
-    <label class="f">Toplam birikim hedefi (₺)<input type="number" step="0.01" id="s_gt" value="${g.goalTotal}"></label>
+    <label class="f">Aylık birikim hedefi (₺)<input type="text" inputmode="decimal" data-calc id="s_gm" value="${fmtPlain(g.goalMonthly)}" autocomplete="off"></label>
+    <label class="f">Toplam birikim hedefi (₺)<input type="text" inputmode="decimal" data-calc id="s_gt" value="${fmtPlain(g.goalTotal)}" autocomplete="off"></label>
     <label class="f">Kart asgari ödeme oranı (% — ekstre borcu üzerinden)<input type="number" step="1" min="1" max="100" id="s_mr" value="${g.minRate ?? 40}"></label>
     <button class="primary" onclick="saveSettings()">Kaydet</button>
     <p class="muted" style="font-size:12px">Başlangıç tarihinden önceki işlemler ve taksitler bakiyeye eklenmez; girdiğiniz açılış bakiyesi o günün bakiyesidir.</p>
@@ -798,6 +832,7 @@ function form(title, fields, vals, onSave){
   d.innerHTML = `<form autocomplete="off" data-lpignore="true" data-1p-ignore><h3>${title}</h3>${fields.map(f => {
     const v = vals[f.k] ?? "";
     const inp = f.t === "select" ? `<select name="${f.k}">${f.opts.map(([o, l]) => `<option value="${esc(o)}"${o == v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`
+      : f.t === "calc" ? `<input name="${f.k}" type="text" inputmode="decimal" data-calc value="${v === "" ? "" : fmtPlain(+v)}" placeholder="örn. 1750*2" autocomplete="off"${f.req ? " required" : ""}>`
       : `<input name="${f.k}" type="${f.t}" value="${esc(v)}" autocomplete="off"${f.t === "number" ? ' step="0.01"' : ""}${f.list ? ` list="${f.list}"` : ""}${f.req ? " required" : ""}>`;
     return `<label class="f" data-k="${f.k}">${f.l}${inp}</label>`; }).join("")}
     <datalist id="cats">${["Maaş","Ek gelir","Market","Fatura","Kira","Ulaşım","Sağlık","Eğitim","Eğlence","Giyim","Yemek","Diğer"].map(c => `<option>${c}</option>`).join("")}</datalist>
@@ -806,8 +841,11 @@ function form(title, fields, vals, onSave){
   const toggle = () => fields.forEach(f => { if (f.when){ const cur = fm.elements[f.when.k].value; fm.querySelector(`[data-k="${f.k}"]`).style.display = f.when.v.includes(cur) ? "" : "none"; } });
   fm.addEventListener("change", toggle); toggle();
   $("#cx").onclick = () => d.close();
-  fm.onsubmit = e => { e.preventDefault(); const o = {};
-    fields.forEach(f => { const el = fm.elements[f.k]; o[f.k] = f.t === "number" ? (parseFloat(String(el.value).replace(",", ".")) || 0) : el.value; });
+  fm.onsubmit = e => { e.preventDefault(); const o = {}; let bad = null;
+    fields.forEach(f => { const el = fm.elements[f.k];
+      if (f.t === "calc"){ const v = calcEval(el.value); if (el.value.trim() && isNaN(v)) bad = bad || f.l; o[f.k] = isNaN(v) ? 0 : v; }
+      else o[f.k] = f.t === "number" ? (parseFloat(String(el.value).replace(",", ".")) || 0) : el.value; });
+    if (bad) return alert(`"${bad}" alanındaki işlem anlaşılamadı. Örnek: 1750*2 ya da (1200+300)/3`);
     if (onSave(o) === false) return;   /* doğrulama başarısızsa pencere açık kalır */
     d.close(); save(); render(); };
   d.showModal();
@@ -821,8 +859,8 @@ function editAcc(id, type){
   form(id ? "Hesabı düzenle" : "Yeni hesap", [
     {k:"name", l:"Ad", t:"text", req:1},
     {k:"type", l:"Tür", t:"select", opts:[["banka","Banka hesabı"],["nakit","Nakit"],["kart","Kredi kartı"]]},
-    {k:"opening", l:"Açılış bakiyesi (kart için mevcut borç, artı olarak girin; kart borcu açılış ayının son ödeme gününde ödenir)", t:"number"},
-    {k:"limit", l:"Kart limiti", t:"number", when:{k:"type", v:["kart"]}},
+    {k:"opening", l:"Açılış bakiyesi (kart için mevcut borç, artı olarak girin; kart borcu açılış ayının son ödeme gününde ödenir)", t:"calc"},
+    {k:"limit", l:"Kart limiti", t:"calc", when:{k:"type", v:["kart"]}},
     {k:"cut", l:"Hesap kesim günü", t:"number", when:{k:"type", v:["kart"]}},
     {k:"due", l:"Son ödeme günü", t:"number", when:{k:"type", v:["kart"]}},
     {k:"payAcc", l:"Otomatik ödeme hesabı (borç son ödeme gününde buradan düşer)", t:"select", opts:[["", "Yok — kart borcunu kasa tahminine katma"], ...accOpts(x => x.type !== "kart" && x.id !== id)], when:{k:"type", v:["kart"]}},
@@ -836,7 +874,7 @@ function txForm(t, onSave){
   form(t.id ? "İşlemi düzenle" : "Yeni işlem", [
     {k:"type", l:"Tür", t:"select", opts:[["gider","Gider (harcama)"],["gelir","Gelir"],["kartodeme","Kart borcu ödemesi (bankadan karta)"],["transfer","Hesaplar arası transfer"]]},
     {k:"date", l:"Tarih", t:"date", req:1},
-    {k:"amount", l:"Tutar (₺)", t:"number", req:1},
+    {k:"amount", l:"Tutar (₺) — işlem yazabilirsiniz: 1750*2", t:"calc", req:1},
     {k:"account", l:"Harcanan / gelirin yattığı hesap veya kart", t:"select", opts:accOpts(), when:{k:"type", v:["gider","gelir"]}},
     {k:"srcBank", l:"Ödemenin yapılacağı hesap (paranın çıkacağı yer)", t:"select", opts:accOpts(a => a.type !== "kart"), when:{k:"type", v:["kartodeme"]}},
     {k:"toCard", l:"Ödenecek kredi kartı", t:"select", opts:accOpts(a => a.type === "kart"), when:{k:"type", v:["kartodeme"]}},
@@ -880,7 +918,7 @@ function editLoan(id){ if (needAcc()) return;
   const l = id ? db.loans.find(x => x.id === id) : {name:"", account:db.accounts[0].id, amount:0, count:12, start:thisYM(), day:15};
   form(id ? "Krediyi düzenle" : "Yeni kredi", [
     {k:"name", l:"Kredi adı", t:"text", req:1}, {k:"account", l:"Ödeme yapılan hesap", t:"select", opts:accOpts()},
-    {k:"amount", l:"Aylık taksit (₺)", t:"number", req:1}, {k:"count", l:"Toplam taksit sayısı", t:"number", req:1},
+    {k:"amount", l:"Aylık taksit (₺)", t:"calc", req:1}, {k:"count", l:"Toplam taksit sayısı", t:"number", req:1},
     {k:"start", l:"İlk taksit ayı", t:"month", req:1}, {k:"day", l:"Ödeme günü", t:"number"}], l,
     o => { o.count = Math.max(1, Math.round(o.count)); o.day = o.day || 1; if (id) Object.assign(l, o); else db.loans.push({id:uid(), ...o}); }); }
 function editTaksit(id){ if (!db.accounts.some(a => a.type === "kart")){ alert("Önce bir kredi kartı ekleyin."); S.tab = "hesap"; render(); return; }
@@ -888,14 +926,14 @@ function editTaksit(id){ if (!db.accounts.some(a => a.type === "kart")){ alert("
   const x = id ? db.taksit.find(y => y.id === id) : {name:"", card:cards[0].id, total:0, count:6, start:thisYM(), day:1};
   form(id ? "Taksiti düzenle" : "Yeni kart taksiti", [
     {k:"name", l:"Alışveriş", t:"text", req:1}, {k:"card", l:"Kart", t:"select", opts:accOpts(a => a.type === "kart")},
-    {k:"total", l:"Toplam tutar (₺)", t:"number", req:1}, {k:"count", l:"Taksit sayısı", t:"number", req:1},
+    {k:"total", l:"Toplam tutar (₺)", t:"calc", req:1}, {k:"count", l:"Taksit sayısı", t:"number", req:1},
     {k:"start", l:"İlk taksit ayı", t:"month", req:1}, {k:"day", l:"Karta yansıma günü", t:"number"}], x,
     o => { o.count = Math.max(1, Math.round(o.count)); o.day = o.day || 1; if (id) Object.assign(x, o); else db.taksit.push({id:uid(), ...o}); }); }
 function editRec(id){ if (needAcc()) return;
   const r = id ? db.rec.find(x => x.id === id) : {name:"", type:"gider", amount:0, day:1, account:db.accounts[0].id, cat:"", start:thisYM(), end:""};
   form(id ? "Düzenliyi düzenle" : "Yeni düzenli kalem", [
     {k:"name", l:"Ad (maaş, kira…)", t:"text", req:1}, {k:"type", l:"Tür", t:"select", opts:[["gider","Gider"],["gelir","Gelir"]]},
-    {k:"amount", l:"Aylık tutar (₺)", t:"number", req:1}, {k:"day", l:"Ayın kaçıncı günü", t:"number"},
+    {k:"amount", l:"Aylık tutar (₺)", t:"calc", req:1}, {k:"day", l:"Ayın kaçıncı günü", t:"number"},
     {k:"account", l:"Hesap / kart", t:"select", opts:accOpts()}, {k:"cat", l:"Kategori", t:"text", list:"cats"},
     {k:"start", l:"Başlangıç ayı", t:"month", req:1}, {k:"end", l:"Bitiş ayı (boşsa süresiz)", t:"month"}], r,
     o => { o.day = o.day || 1; if (id) Object.assign(r, o); else db.rec.push({id:uid(), ...o}); }); }
@@ -907,7 +945,7 @@ function delItem(coll, id){
 }
 function saveSettings(){
   const base = $("#s_base").value; if (!base) return alert("Başlangıç tarihi gerekli.");
-  db.settings = {base, goalMonthly: parseFloat($("#s_gm").value) || 0, goalTotal: parseFloat($("#s_gt").value) || 0, minRate: Math.min(100, Math.max(1, parseFloat($("#s_mr").value) || 40))};
+  db.settings = {base, goalMonthly: calcEval($("#s_gm").value) || 0, goalTotal: calcEval($("#s_gt").value) || 0, minRate: Math.min(100, Math.max(1, parseFloat($("#s_mr").value) || 40))};
   save(); render();
 }
 function exportData(){
